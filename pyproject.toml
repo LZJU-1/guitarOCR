@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "guitarocr"
+version = "0.1.0"
+description = "TuxGuitar-oriented score+TAB PDF recognition and GP5 reconstruction"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "numpy>=1.26,<3",
+  "opencv-python>=4.8,<5",
+  "Pillow>=10,<12",
+  "torch>=2.2,<3",
+  "torchvision>=0.17,<1",
+]
+
+[project.scripts]
+guitarocr = "guitarocr.cli.pdf_to_gp:main"
+guitarocr-check = "guitarocr.cli.check_install:main"
+
+[tool.setuptools.packages.find]
+include = ["guitarocr*"]

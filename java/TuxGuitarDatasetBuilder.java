@@ -59,12 +59,12 @@ import app.tuxguitar.util.plugin.TGPlugin;
  * emits a semantic JSON label for the selected guitar track.
  */
 public class TuxGuitarDatasetBuilder {
-    private static final List<String> EXTENSIONS = List.of("gp3", "gp4", "gp5", "gtp", "gpx");
+    private static final List<String> EXTENSIONS = List.of("gp3", "gp4", "gp5", "gtp", "gpx", "gp");
     private static final int MIN_MEASURES = 4;
-    private static final int MAX_MEASURES = 48;
+    private static final int MAX_MEASURES = 192;
     private static final int MIN_NOTES = 16;
-    private static final int MAX_NOTES = 4000;
-    private static final int MAX_ATTEMPTS_PER_FORMAT = 500;
+    private static final int MAX_NOTES = 12000;
+    private static final int MAX_ATTEMPTS_PER_FORMAT = 5000;
     private static final long SHUFFLE_SEED = 20260713L;
 
     private static final Map<String, Integer> STYLES = new LinkedHashMap<>();
@@ -179,7 +179,7 @@ public class TuxGuitarDatasetBuilder {
                 if (candidates.containsKey(extension)) {
                     try {
                         long size = Files.size(path);
-                        if (size >= 2_000 && size <= 2_000_000) {
+                        if (size >= 2_000 && size <= 20_000_000) {
                             candidates.get(extension).add(path);
                         }
                     } catch (IOException ignored) {

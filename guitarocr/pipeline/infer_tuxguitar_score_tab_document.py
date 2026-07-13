@@ -12,6 +12,7 @@ import torch
 from guitarocr.models.rhythm_context_model import RhythmContextCNN
 from guitarocr.models.score_event_locator_model import ScoreEventLocator
 from guitarocr.models.tab_detector_model import TabSymbolDetector
+from guitarocr.models.technique_context_model import TechniqueContextCNN
 from guitarocr.paths import DATABASE_ROOT, PROJECT_ROOT, WEIGHTS_ROOT
 from guitarocr.pipeline.infer_tuxguitar_score_tab_page import (
     classify_rhythm,
@@ -19,10 +20,14 @@ from guitarocr.pipeline.infer_tuxguitar_score_tab_page import (
     locate_page_events,
     parse_time_signature,
 )
-from guitarocr.pipeline.measure_rhythm_constraints import audit_score_ir
+from guitarocr.pipeline.measure_rhythm_constraints import audit_score_ir, apply_plausible_rhythm_corrections
 from guitarocr.pipeline.pdf_page_renderer import MODEL_RENDER_DPI, render_pdf_pages
-from guitarocr.pipeline.score_tab_fingering import build_score_ir, detect_tab_fingering, resolve_unambiguous_ties
+from guitarocr.pipeline.score_tab_fingering import (
+    build_score_ir, correct_multidigit_fret_outliers, detect_tab_fingering,
+    recover_isolated_tab_events, resolve_unambiguous_ties,
+)
 from guitarocr.pipeline.tie_inference import classify_ties, load_tie_model
+from guitarocr.pipeline.tempo_recognizer import recognize_tempo
 from guitarocr.pipeline.time_signature_recognizer import load_atomic_model, propagate_time_signatures
 
 
@@ -89,6 +94,30 @@ def load_models(args: argparse.Namespace, device: torch.device) -> dict:
 
     atomic, atomic_classes = load_atomic_model(args.atomic_model, device)
     tie, tie_threshold = load_tie_model(args.tie_model, device)
+    technique = None
+    technique_classes = None
+    technique_thresholds = None
+    if args.technique_model.is_file():
+        technique_checkpoint = torch.load(args.technique_model, map_location=device, weights_only=False)
+        technique_classes = list(technique_checkpoint["classes"])
+        technique_thresholds = [float(value) for value in technique_checkpoint.get(
+            "thresholds", [0.5] * len(technique_classes)
+        )]
+        technique = TechniqueContextCNN(len(technique_classes)).to(device)
+        technique.load_state_dict(technique_checkpoint["model_state"])
+        technique.eval()
+    pick_stroke = None
+    pick_stroke_classes = None
+    pick_stroke_thresholds = None
+    if args.pick_stroke_model.is_file():
+        pick_checkpoint = torch.load(args.pick_stroke_model, map_location=device, weights_only=False)
+        pick_stroke_classes = list(pick_checkpoint["classes"])
+        pick_stroke_thresholds = [float(value) for value in pick_checkpoint.get(
+            "thresholds", [0.5] * len(pick_stroke_classes)
+        )]
+        pick_stroke = TechniqueContextCNN(len(pick_stroke_classes)).to(device)
+        pick_stroke.load_state_dict(pick_checkpoint["model_state"])
+        pick_stroke.eval()
     return {
         "locator": locator,
         "locator_threshold": (
@@ -99,10 +128,21 @@ def load_models(args: argparse.Namespace, device: torch.device) -> dict:
         "rhythm": rhythm,
         "tab": tab,
         "tab_classes": tab_classes,
+        "tab_threshold": (
+            args.tab_threshold
+            if args.tab_threshold is not None
+            else float(tab_checkpoint.get("detection_threshold", 0.3))
+        ),
         "atomic": atomic,
         "atomic_classes": atomic_classes,
         "tie": tie,
         "tie_threshold": tie_threshold,
+        "technique": technique,
+        "technique_classes": technique_classes,
+        "technique_thresholds": technique_thresholds,
+        "pick_stroke": pick_stroke,
+        "pick_stroke_classes": pick_stroke_classes,
+        "pick_stroke_thresholds": pick_stroke_thresholds,
     }
 
 
@@ -139,7 +179,16 @@ def main() -> None:
         "--tie-model", type=Path,
         default=WEIGHTS_ROOT / "tie_context_cnn.pt",
     )
+    parser.add_argument(
+        "--technique-model", type=Path,
+        default=WEIGHTS_ROOT / "technique_context_cnn.pt",
+    )
+    parser.add_argument(
+        "--pick-stroke-model", type=Path,
+        default=WEIGHTS_ROOT / "pick_stroke_context_cnn.pt",
+    )
     parser.add_argument("--threshold", type=float)
+    parser.add_argument("--tab-threshold", type=float)
     parser.add_argument("--time-signature-threshold", type=float, default=0.20)
     parser.add_argument("--initial-time-signature", type=parse_time_signature)
     parser.add_argument("--first-measure-number", type=int, default=1)
@@ -170,6 +219,7 @@ def main() -> None:
     document_measures: list[dict] = []
     page_records: list[dict] = []
     string_count: int | None = None
+    tempo_prediction: dict | None = None
 
     for page_index, page_source in enumerate(page_sources, start=1):
         image_path = page_source["image"]
@@ -180,6 +230,10 @@ def main() -> None:
         )
         if not systems:
             raise RuntimeError(f"No paired score/TAB system was detected on {image_path}")
+        if page_index == 1:
+            tempo_prediction = recognize_tempo(
+                page, systems[0], models["atomic"], models["atomic_classes"], device
+            )
         carried_signature = propagate_time_signatures(
             page,
             systems,
@@ -190,12 +244,18 @@ def main() -> None:
             threshold=args.time_signature_threshold,
         )
         detect_tab_fingering(
-            page, systems, models["tab"], models["tab_classes"], device, threshold=0.3
+            page, systems, models["tab"], models["tab_classes"], device,
+            threshold=models["tab_threshold"],
         )
+        recover_isolated_tab_events(systems)
         page_root = args.output / f"page_{page_index:03d}"
         crop_root = page_root / "crops"
         crop_root.mkdir(parents=True, exist_ok=True)
-        classify_rhythm(page, systems, models["rhythm"], device, crop_root)
+        classify_rhythm(
+            page, systems, models["rhythm"], device, crop_root,
+            models["technique"], models["technique_classes"], models["technique_thresholds"],
+            models["pick_stroke"], models["pick_stroke_classes"], models["pick_stroke_thresholds"],
+        )
         classify_ties(page, systems, models["tie"], device, models["tie_threshold"])
         page_ir = build_score_ir(systems, measure_number_offset=next_measure_number)
         audit_score_ir(page_ir)
@@ -244,9 +304,9 @@ def main() -> None:
             {
                 "track": 1,
                 "string_count": string_count,
-                "string_tuning_midi": None,
+                "string_tuning_midi": [64, 59, 55, 50, 45, 40] if string_count == 6 else None,
                 "capo": None,
-                "tempo_quarter": None,
+                "tempo_quarter": tempo_prediction["tempo_quarter"] if tempo_prediction else None,
                 "measures": document_measures,
             }
         ],
@@ -256,7 +316,10 @@ def main() -> None:
             "multi-voice note assignment remain unresolved."
         ),
     }
-    audit = audit_score_ir(document_ir)
+    audit_score_ir(document_ir)
+    rhythm_corrections = apply_plausible_rhythm_corrections(document_ir)
+    audit = document_ir["rhythm_audit_summary"]
+    fret_corrections = correct_multidigit_fret_outliers(document_ir)
     tie_summary = resolve_unambiguous_ties(document_ir)
     output_path = args.output / "document_score_ir.json"
     output_path.write_text(json.dumps(document_ir, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -268,7 +331,10 @@ def main() -> None:
             measure["printed_time_signature"] is not None for measure in document_measures
         ),
         "rhythm_audit": audit,
+        "rhythm_corrections": rhythm_corrections,
         "ties": tie_summary,
+        "fret_corrections": fret_corrections,
+        "tempo_prediction": tempo_prediction,
         "score_ir": str(output_path),
     }, ensure_ascii=False))
 

@@ -1,59 +1,57 @@
 # GuitarOCR
 
-GuitarOCR 将规则排版的吉他“五线谱 + 六线 TAB”PDF 恢复为可编辑的 GP5。当前目标不是通用乐谱 OCR，而是先可靠覆盖网上常见的、由制谱软件导出的标准吉他谱。
+GuitarOCR 把规则排版的吉他“五线谱 + 六线 TAB”PDF 恢复为可编辑的 GP5。项目当前聚焦 TuxGuitar 2.0.1 的印刷样式，不是手写谱或任意制谱软件的通用 OMR。
 
 ```text
 PDF / 整页图片
-  → 谱表与小节几何
-  → 事件位置、节奏、休止、附点、连音与 TAB 指法识别
-  → Score Event IR
-  → 小节时值和延音约束
+  → 版式与谱表/小节几何
+  → 时间事件定位
+  → 节奏、TAB 弦/品、X、延音和演奏技法 CNN
+  → Score Event IR + 小节时值/上下文约束
   → GP5
-  → TuxGuitar 回读校验与预览 PDF
+  → TuxGuitar 回读校验 + 预览 PDF
 ```
 
-仓库包含完整源码、数据构建/训练/评估脚本和五个推理模型；不包含原始曲谱语料、批量渲染图片以及第三方 TuxGuitar/Poppler 运行时。
+仓库包含源码、数据构建/训练/评估脚本和七个轻量推理模型；不提交原始曲谱、批量渲染图、训练数据库或第三方运行时。
 
-## 已验证运行环境
+## 当前能做到什么
 
-| 项目 | 当前范围 |
+| PDF 版式 | 状态 | 当前能力 |
+| --- | --- | --- |
+| `score_tab`：五线谱 + 六线 TAB | **主流程支持** | PDF/整页图 → 事件、节奏、弦/品、X、延音与部分技法 → IR → GP5/PDF |
+| `tab_only`：纯六线 TAB | **实验阶段** | 能分类版式、找谱线/小节、检测数字/X并组合事件；纯 TAB 的可靠节奏恢复和默认 GP5 导出尚未完成 |
+| `score_only`：纯五线谱 | **仅版式识别** | 能分类版式；仅凭音高无法唯一反推出吉他的弦/品指法，当前不导出 GP5 |
+
+主流程的有效输入范围：
+
+- TuxGuitar 2.0.1 导出的规则 `score_tab` 矢量 PDF；
+- 完整页面 `PNG/JPG/JPEG/BMP/TIF/TIFF`，缩放和留白接近 180-DPI TuxGuitar 页面；
+- 常规拍号、音符/和弦事件、休止、附点、连音组、TAB 多位数品位和 X；
+- 延音候选与部分和弦延音；dead/muted、vibrato、bend、hammer、slide、ghost、accent、harmonic、grace、palm mute、staccato、let ring、tapping 等技法标签；
+- 单吉他轨、主声部、六弦标准或 IR 中已知的调弦。
+
+尚不承诺：手写谱、拍照/透视、严重扫描噪声、复杂多声部、多轨、歌词/和弦图、反复结构、全部跨系统连线，以及 Guitar Pro、MuseScore、Sibelius 等其他软件的字体和排版。其他软件导出的规则谱需要加入对应真实 PDF 做域适配。
+
+GP5 也有格式限制：TuxGuitar 的 GP5 模型不能让同一音同时保留 dead/X 和 slide。导出时优先保留页面上可见的 X，冲突会写入 `*.report.json`；完整语义仍保存在 IR，未来可由 GPIF 写入器使用。标题、调号和分页样式也不保证与源 PDF 一致，但音高可用逐音临时升降号表达。
+
+## 已验证环境
+
+| 项目 | 已验证配置 |
 | --- | --- |
-| 操作系统 | Windows 10/11 x86-64（当前完整流程的已验证平台） |
-| Python | 3.10–3.12；开发与回归环境为 Python 3.11 |
-| PyTorch | CPU 可推理；NVIDIA CUDA 推荐用于训练和批量推理 |
+| 操作系统 | Windows 10/11 x86-64 |
+| Python | 3.10–3.12；本次开发/回归为 Python 3.11 |
+| PyTorch | CPU 可推理；NVIDIA CUDA 推荐训练和批量推理 |
 | 制谱运行时 | TuxGuitar 2.0.1 |
-| Java | JDK 17+，必须能在命令行运行 `javac` |
-| PDF 渲染 | Poppler，固定以 180 DPI 灰度渲染 |
-| 输出 | GP5、Score IR JSON、事件计划 TSV、回读报告 JSON、可选预览 PDF |
-
-TuxGuitar 和 Poppler 都由安装脚本从各自的 GitHub Release 下载到仓库本地目录，不会提交到 Git。
-
-## 支持什么谱面
-
-当前预训练模型的有效范围：
-
-- TuxGuitar 2.0.1 导出的标准 `score_tab` 页面：上方五线谱、下方六弦 TAB；
-- 规则的矢量 PDF，横向或纵向分页均可，输入 PDF 会统一渲染为 180 DPI；
-- 整页 `PNG/JPG/JPEG/BMP/TIF/TIFF`，但尺寸、缩放和留白应接近 TuxGuitar 180-DPI 页面；
-- 常规拍号、音符/和弦事件、休止、附点、连音、横梁、TAB 品位数字与 X；
-- 单吉他轨和主声部是当前 GP5 重建重点。
-
-以下情况目前不承诺正确：
-
-- 手写谱、相机拍照、明显倾斜/透视、低清扫描、重噪声或严重裁边；
-- Guitar Pro、MuseScore、Sibelius 等其他软件的字体与页面布局——后续需要用对应软件的样本做域适配；
-- 纯数字简谱、鼓谱、钢琴谱、歌词 OCR；
-- 多轨、复杂多声部、和弦图、歌词、完整演奏技法和所有跨系统连线的无损复原；
-- 只改了文件扩展名、内部并非有效图片/PDF 的文件。
-
-换句话说：当前最适合“从 TuxGuitar 导出的规则 PDF 再转回 GP5”，其他软件导出的规则谱可以尝试，但应先检查 `report.json` 和重渲染 PDF。
+| Java | JDK 17+，命令行可运行 `javac` |
+| PDF 渲染 | Poppler，180 DPI 灰度 |
+| 输出 | GP5、Score IR JSON、计划 TSV、回读报告 JSON、预览 PDF |
 
 ## Windows 快速开始
 
-先安装 Git、Python 3.11 和 JDK 17+，然后：
+先安装 Git、Python 3.11 和 JDK 17+：
 
 ```powershell
-git clone git@github.com:LZJU-1/guitarOCR.git
+git clone https://github.com/LZJU-1/guitarOCR.git
 cd guitarOCR
 Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\setup_windows.ps1
@@ -61,7 +59,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 guitarocr-check
 ```
 
-`setup_windows.ps1` 会创建 `.venv`，安装 Python 依赖，并下载 TuxGuitar 2.0.1 与 Poppler。若已经自行安装，可以设置：
+安装脚本创建 `.venv`，并把 TuxGuitar 2.0.1 与 Poppler 下载到仓库本地。如果已有运行时，可以设置：
 
 ```powershell
 $env:GUITAROCR_TUXGUITAR_ROOT = 'D:\software\tuxguitar'
@@ -77,24 +75,16 @@ guitarocr D:\scores\input.pdf `
   --preview-pdf D:\scores\result_preview.pdf
 ```
 
-也可以不激活虚拟环境：
+中间文件默认在 `database/end_to_end/<PDF文件名>/`：
 
-```powershell
-& .\.venv\Scripts\python.exe .\pdf_to_gp.py D:\scores\input.pdf `
-  -o D:\scores\result.gp5 `
-  --preview-pdf D:\scores\result_preview.pdf
-```
+- `rendered_pages/`：180-DPI 页图；
+- `pages/`：逐页 IR、事件裁块和 QA 可视化；
+- `document_score_ir.json`：跨页合并后的 Score Event IR；
+- 输出旁的 `.plan.tsv` / `.report.json`：写入计划、假设、格式降级和 TuxGuitar 回读结果。
 
-推理中间文件默认位于 `database/end_to_end/<PDF文件名>/`：
-
-- `rendered_pages/`：180-DPI 页面；
-- `pages/`：逐页 IR、事件裁块和可视化；
-- `document_score_ir.json`：跨页合并后的中间语义；
-- 输出旁的 `.plan.tsv` 和 `.report.json`：GP5 写入计划与 TuxGuitar 回读统计。
+程序写完 GP5 后会重新读入，并检查小节数、事件位置、节奏、弦/品、延音及可表示的技法；回读不一致时命令失败。
 
 ### 整页图片输入
-
-根命令针对 PDF。已有整页图片时先生成 IR，再导出：
 
 ```powershell
 python -m guitarocr.pipeline.infer_tuxguitar_score_tab_document `
@@ -107,48 +97,81 @@ python -m guitarocr.export.export_score_ir_to_gp `
   --preview-pdf D:\work\song_preview.pdf
 ```
 
-图片必须是完整页面并按页序传入；不要先切成单个音符。
-
-## 模型
-
-默认推理直接读取 `weights/` 下约 10.6 MiB 的五个 PyTorch checkpoint：
-
-| 模型 | 作用 |
-| --- | --- |
-| `score_event_locator.pt` | 在五线谱小节中定位时间事件的横坐标 |
-| `rhythm_context_cnn.pt` | 识别音符/休止、时值、附点、连音组等上下文 |
-| `tab_symbol_detector.pt` | 定位并分类 TAB 数字和 X |
-| `atomic_symbol_cnn.pt` | 识别拍号数字等原子印刷符号 |
-| `tie_context_cnn.pt` | 判断延音候选及其音高关系 |
-
-文件大小和 SHA-256 见 [weights/README.md](weights/README.md)。模型不是大语言模型，CPU 可以运行；CUDA 主要改善速度。
-
-## 用新数据重新训练
-
-### 1. 准备源文件
-
-把合法的 `.gp3/.gp4/.gp5/.gtp/.gpx` 放在任意目录中。脚本会递归读取三层、用 TuxGuitar 渲染 `tab_only/score_tab/score_only` 三种布局，并按源曲目隔离为 train/validation/test，避免同一首曲子跨集合泄漏。
-
-不要把来源不明或无权分发的曲谱提交到 GitHub。
-
-### 2. 构建基础数据库和坐标真值
+必须按页序传入完整页面，不要先把页面切成单个符号。单独查看某页属于哪种版式：
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
+guitarocr-layout D:\pages\page_001.png
+```
 
+### 有 GP 真值时做端到端验收
+
+```powershell
+.\scripts\run_gp_acceptance.ps1 `
+  -Gp 'D:\scores\song.gp' `
+  -OutputDir 'D:\scores\song_acceptance'
+```
+
+该脚本依次生成 `GT.pdf`、执行 `GT.pdf → PRE.gp5 → PRE.pdf`，再把 OCR IR 与 GP7/8 内部 GPIF 语义逐事件比较。
+
+## 模型和本次指标
+
+默认推理读取 `weights/` 下约 17.41 MiB 的七个 checkpoint：
+
+| 模型 | 参数量 | 作用 |
+| --- | ---: | --- |
+| `score_event_locator.pt` | 161,538 | 在五线谱小节中定位时间事件横坐标 |
+| `rhythm_context_cnn.pt` | 882,956 | 音符/休止、时值、附点、连音组等上下文 |
+| `tab_symbol_detector.pt` | 592,623 | 定位并分类 TAB 数字与 X |
+| `atomic_symbol_cnn.pt` | 218,884 | 拍号数字等原子印刷符号 |
+| `tie_context_cnn.pt` | 888,096 | 延音存在、数量和目标音高关系 |
+| `technique_context_cnn.pt` | 874,989 | 多标签演奏技法上下文 |
+| `pick_stroke_context_cnn.pt` | 875,503 | 上拨/下拨事件上下文；只覆盖主技法模型的 PickStroke 两项 |
+
+扩大后的 TuxGuitar 语料含 331 个 GP/GTP 源文件、26,682 小节、180,417 个节奏事件裁块、318,376 个音符；TAB 检测集合含 65,953 个混合版式小节图块和 752,401 个数字/X 标注。划分按源曲目隔离。
+
+主要独立测试结果：
+
+- 节奏 CNN：主声部完整语义 99.596%，全事件 99.456%；
+- TAB 检测器：precision 99.614%、recall 99.970%、F1 99.791%，85,423 个真值中漏检 26 个；
+- 延音 CNN：presence F1 99.119%，延音数量准确率 88.950%，目标纵坐标 F1 94.422%；
+- 技法 CNN：dead F1 99.650%、vibrato 95.833%、bend 98.876%、palm mute 96.970%；slide 只有 48.415%，ghost/accent 等稀有类仍需更多真实样本。PickStroke 的独立测试只有 1 个上拨、0 个下拨，不足以证明跨曲泛化。
+
+目标回归曲《若能绽放光芒 Final 教学版》在最多 10 轮 hard-case 修正后达到 168/168 小节、701/701 事件、1,425/1,425 音符、61/61 个 X，以及该曲出现的 palm mute/slide/vibrato、153 个上拨和 389 个下拨全部命中。**该曲被加入过训练和规则修正，因此这是回归验收，不是独立泛化成绩。**
+
+模型文件大小和 SHA-256 见 [weights/README.md](weights/README.md)，完整实验口径见 [docs/EXPERIMENT_RESULTS.md](docs/EXPERIMENT_RESULTS.md)。
+
+## 用自己的 GP 扩大数据集
+
+### 1. 准备语料
+
+把合法的 `.gp/.gp3/.gp4/.gp5/.gtp/.gpx` 放到一个目录。只使用有权处理的数据，不要把第三方曲谱提交到 GitHub。
+
+```powershell
 .\scripts\build_database.ps1 `
   -CorpusRoot D:\my_gp_corpus `
   -DatabaseRoot D:\guitarocr_database `
   -PerFormat 100
 
 $env:GUITAROCR_DATABASE_ROOT = 'D:\guitarocr_database'
-.\scripts\build_tuxguitar_page_annotations.ps1
-.\scripts\build_score_rhythm_dataset.ps1
 ```
 
-坐标真值来自 TuxGuitar 自身的排版/绘制过程，只用于生成训练标签；正式推理只读取 PDF 或图片，不会得到这些坐标。
+基础构建会让 TuxGuitar 输出 `tab_only`、`score_tab`、`score_only` 三种渲染图和曲谱语义。坐标真值只在生成训练标签时使用；正式 OCR 只有 PDF/图片像素。
 
-### 3. 训练与完整评估
+### 2. 生成坐标、节奏和技法标签
+
+```powershell
+.\scripts\build_tuxguitar_page_annotations.ps1 -Layout tab_only
+.\scripts\build_tuxguitar_page_annotations.ps1 -Layout score_tab
+.\scripts\build_score_rhythm_dataset.ps1
+
+# 可选：GP7/8 .gp ZIP 的技法以内部 GPIF 精确覆盖渲染器标签
+python -m guitarocr.data.augment_gpif_technique_labels <source_id> `
+  --database D:\guitarocr_database
+```
+
+数据构建器会按源曲目创建 train/validation/test，避免同一首曲子的不同页面泄漏到测试集。`source_id` 可在 `database/manifests/sources.jsonl` 查看。
+
+### 3. 训练与评估
 
 ```powershell
 .\scripts\run_symbol_cnn.ps1
@@ -156,26 +179,27 @@ $env:GUITAROCR_DATABASE_ROOT = 'D:\guitarocr_database'
 .\scripts\run_rhythm_context.ps1 -SkipDatasetBuild
 .\scripts\run_score_event_locator.ps1
 .\scripts\run_tie_context.ps1
+
+python -m guitarocr.training.train_technique_context `
+  --database D:\guitarocr_database --epochs 20 --batch-size 64
+
+# 联合模型也可作为 PickStroke 专用覆盖模型；分别验收后再发布
+Copy-Item D:\guitarocr_database\technique_events\models\technique_context_cnn.pt `
+  D:\guitarocr_database\technique_events\models\pick_stroke_context_cnn.pt
 ```
 
-训练产物写入数据库各任务的 `models/`，评估程序会分别检查符号、TAB、事件定位、节奏、拍号、小节约束和延音。训练建议使用 NVIDIA GPU；CPU 训练会很慢。
-
-只有在新模型通过 validation/test 和整页重渲染对照后，才替换仓库默认权重：
+训练建议使用 NVIDIA GPU。只有 validation/test、整页 IR 和重渲染 PDF 都通过后再发布权重：
 
 ```powershell
 .\scripts\promote_models.ps1 -DatabaseRoot D:\guitarocr_database
 guitarocr-check
 ```
 
-## 在少量新样本上微调
+## 少量新样本微调
 
-定位、节奏、TAB、原子符号和延音训练器都支持从现有 checkpoint 初始化。先按上一节生成新域的数据和 source-disjoint 划分，再使用较小学习率，例如：
+节奏、TAB、延音和技法训练器都能从现有 checkpoint 初始化：
 
 ```powershell
-python -m guitarocr.training.train_score_event_locator `
-  --database D:\guitarocr_database --epochs 8 --batch-size 16 --learning-rate 0.0002 `
-  --init-checkpoint .\weights\score_event_locator.pt
-
 python -m guitarocr.training.train_rhythm_context `
   --database D:\guitarocr_database --epochs 8 --learning-rate 0.0002 `
   --init-checkpoint .\weights\rhythm_context_cnn.pt
@@ -188,36 +212,40 @@ python -m guitarocr.training.train_tie_context `
   --database D:\guitarocr_database --epochs 8 --learning-rate 0.0001 `
   --init-checkpoint .\weights\tie_context_cnn.pt
 
-python -m guitarocr.training.train_symbol_cnn `
-  --data D:\guitarocr_database\symbol_cnn\dataset `
-  --output D:\guitarocr_database\symbol_cnn\models `
-  --epochs 8 --learning-rate 0.0002 `
-  --init-checkpoint .\weights\atomic_symbol_cnn.pt
+python -m guitarocr.training.train_technique_context `
+  --database D:\guitarocr_database --epochs 8 --learning-rate 0.0001 `
+  --init-checkpoint .\weights\technique_context_cnn.pt
 ```
 
-注意：
+实践要求：
 
-- TAB/原子符号 checkpoint 的类别集合必须与新数据一致；新增类别需要重新定义模型输出并重训；
-- 微调集不能只包含一种简单谱面，应保留不同拍号、时值、和弦、休止、附点、连音和多位数品位；
-- 测试集必须按“源曲目”隔离，不能把同一 PDF 的不同页拆到训练和测试；
-- 适配 Guitar Pro/MuseScore 等新软件时，优先加入该软件真实导出 PDF，并保留一套完全未参与训练的整页测试集；
-- 不要只看裁块分类准确率，最终以整页事件匹配、小节时值正确率和 GP5 重渲染结果为准。
+- 新域测试集必须按源曲目隔离；目标 hard case 的成绩不能当独立测试成绩；
+- 保留多拍号、时值、和弦、休止、附点、连音、多位数品位和稀有技法；
+- 技法是长尾多标签任务，slide、ghost、accent、tapping 等不能只靠过采样，仍需要足够不同曲目的正例；
+- 适配其他制谱软件时，加入该软件真实导出的 PDF，并留一套完全未训练的整页测试集；
+- 不只看裁块准确率，最终看整页事件、小节时值、弦/品和 GP5 回读/重渲染。
+
+## 为什么没有默认接入 1B OCR/LLM
+
+GLM-OCR 0.9B、HunyuanOCR 等是通用文档视觉语言模型，不直接输出本项目所需的弦号、品位、精确 onset、时值和跨事件约束。当前约 17.4 MiB 的专用 CNN + 确定性音乐约束更小、更快，也能用 GP 真值精确监督。它们可作为弱标注教师、标题/速度文字 OCR 或失败页路由器；真正适合下一步的是在 CNN 事件特征上训练约 10–30M 参数的小型事件序列 Transformer，而不是让通用 OCR 模型直接生成 GP。
+
+评估依据与官方项目链接见 [docs/OCR_CONTEXT_MODEL_ASSESSMENT.md](docs/OCR_CONTEXT_MODEL_ASSESSMENT.md)。
 
 ## 代码结构
 
 ```text
 guitarocr/
-├─ models/       # 轻量 CNN 定义
-├─ pipeline/     # 页面解析、事件识别、音乐约束和 IR 合并
-├─ data/         # 数据集构建
-├─ training/     # 训练与微调
-├─ evaluation/   # 数据/模型/整页评估
-├─ export/       # Score IR→GP5、GP→PDF
-└─ cli/          # 命令行入口和环境检查
-scripts/         # Windows 安装、数据构建、训练和模型发布脚本
+├─ models/       # 轻量 CNN
+├─ pipeline/     # 页面解析、版式、事件、上下文约束和 IR 合并
+├─ data/         # GP/GPIF 读取与数据集构建
+├─ training/     # 训练、微调、阈值选择
+├─ evaluation/   # 数据、模型、整页和 GPIF 评估
+├─ export/       # Score IR → GP5、GP → PDF
+└─ cli/          # 命令行入口、版式分类和环境检查
+scripts/         # Windows 安装、数据构建、训练、验收和发布
 java/            # TuxGuitar 标注、写入、回读和渲染桥接
-weights/         # 随仓库发布的五个推理 checkpoint
-docs/            # 架构、IR 协议和历史实验记录
+weights/         # 七个随仓库发布的 checkpoint
+docs/            # 架构、IR、实验和上下文模型评估
 database/        # 本地生成，不提交
 ```
 
@@ -225,4 +253,4 @@ database/        # 本地生成，不提交
 
 - [识别与重建架构](docs/RECOGNITION_ARCHITECTURE.md)
 - [Score Event IR 协议](docs/EVENT_IR_SCHEMA.md)
-- [已有模型与实验记录](docs/EXPERIMENT_RESULTS.md)
+- [实验与结果](docs/EXPERIMENT_RESULTS.md)

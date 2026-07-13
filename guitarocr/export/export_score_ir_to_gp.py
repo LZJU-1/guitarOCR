@@ -172,7 +172,7 @@ def build_plan(
 
     encoded_title = base64.b64encode(actual_title.encode("utf-8")).decode("ascii")
     lines = [
-        "GUITAROCR_PLAN\t1",
+        "GUITAROCR_PLAN\t2",
         f"META\tTITLE_B64\t{encoded_title}",
         f"META\tTEMPO\t{actual_tempo}",
         "META\tTUNING\t" + ",".join(str(value) for value in actual_tuning),
@@ -183,6 +183,7 @@ def build_plan(
     exported_rests = 0
     generated_rests = 0
     tied_notes = 0
+    pick_stroke_events = 0
     exact_measures = 0
 
     for measure_index, measure in enumerate(measures):
@@ -265,6 +266,25 @@ def build_plan(
             dot = voice.get("dot") or "none"
             division = voice.get("division") or "1:1"
             notes_text = "-"
+            technique = event.get("technique_prediction") or {}
+            positive = technique.get("positive") or {}
+            pick_up = bool(positive.get("pick_up", False))
+            pick_down = bool(positive.get("pick_down", False))
+            if pick_up and pick_down:
+                probabilities = technique.get("probabilities") or {}
+                pick_up = float(probabilities.get("pick_up", 0.0)) >= float(
+                    probabilities.get("pick_down", 0.0)
+                )
+                pick_down = not pick_up
+                issue(
+                    report,
+                    "conflicting_pick_stroke",
+                    "Both pick directions passed threshold; kept the higher probability",
+                    measure=measure_number,
+                    event_order=event_order,
+                )
+            pick_stroke = 1 if pick_up else -1 if pick_down else 0
+            pick_stroke_events += int(pick_stroke != 0)
             if state == "note":
                 notes_by_string: dict[int, dict] = {}
                 for note in event.get("notes", []):
@@ -282,6 +302,13 @@ def build_plan(
                             event_order=event_order,
                         )
                         continue
+                    is_dead = bool(note.get("dead") or note.get("muted")) or (
+                        isinstance(fret, str) and fret.upper() == "X"
+                    )
+                    if is_dead:
+                        # Dead notes are printed as X. Their sounding fret is not recoverable from
+                        # the raster, so GP receives fret zero plus the exact dead-note semantic.
+                        fret = int(note.get("underlying_fret", 0))
                     if not isinstance(fret, int) or not 0 <= fret <= 99:
                         issue(
                             report,
@@ -316,7 +343,45 @@ def build_plan(
                 for string, note in sorted(notes_by_string.items()):
                     tied = bool(note.get("tie_in"))
                     tied_notes += int(tied)
-                    note_parts.append(f"{string}:{int(note['fret'])}:{int(tied)}")
+                    fret = note.get("fret")
+                    dead = bool(note.get("dead") or note.get("muted")) or (
+                        isinstance(fret, str) and fret.upper() == "X"
+                    )
+                    encoded_fret = int(note.get("underlying_fret", 0)) if dead else int(fret)
+                    effects = note.get("effects") or {}
+                    slide = bool(effects.get("slide", note.get("slide", False)))
+                    if dead and slide:
+                        # TuxGuitar's GP5 note model treats dead-note and slide as
+                        # mutually exclusive setters. Prefer the visible/audible X;
+                        # the richer IR keeps both semantics for a future GPIF writer.
+                        slide = False
+                        issue(
+                            report,
+                            "gp5_dead_slide_conflict",
+                            "GP5 cannot retain slide and dead-note on one note; kept the X",
+                            measure=measure_number,
+                            event_order=event_order,
+                            string=string,
+                        )
+                    flags = [
+                        dead,
+                        bool(effects.get("vibrato", note.get("vibrato", False))),
+                        slide,
+                        bool(effects.get("hammer", note.get("hammer", False))),
+                        bool(effects.get("bend", note.get("bend", False))),
+                        bool(effects.get("ghost", note.get("ghost", False))),
+                        bool(effects.get("accent", note.get("accent", False))),
+                        bool(effects.get("palm_mute", note.get("palm_mute", False))),
+                        bool(effects.get("staccato", note.get("staccato", False))),
+                        bool(effects.get("let_ring", note.get("let_ring", False))),
+                        bool(effects.get("tapping", note.get("tapping", False))),
+                    ]
+                    note_parts.append(
+                        ":".join(
+                            [str(string), str(encoded_fret), str(int(tied))]
+                            + [str(int(value)) for value in flags]
+                        )
+                    )
                 notes_text = ",".join(note_parts)
                 exported_notes += len(note_parts)
             else:
@@ -330,6 +395,7 @@ def build_plan(
                     "division": division,
                     "state": state,
                     "notes": notes_text,
+                    "pick_stroke": pick_stroke,
                     "duration": duration,
                     "generated": False,
                 }
@@ -364,6 +430,7 @@ def build_plan(
                             "division": division,
                             "state": "generated_rest",
                             "notes": "-",
+                            "pick_stroke": 0,
                             "duration": duration,
                             "generated": True,
                         }
@@ -388,6 +455,7 @@ def build_plan(
                         "division": division,
                         "state": "generated_rest",
                         "notes": "-",
+                        "pick_stroke": 0,
                         "duration": duration,
                         "generated": True,
                     }
@@ -410,6 +478,7 @@ def build_plan(
                         str(row["division"]),
                         str(row["state"]),
                         str(row["notes"]),
+                        str(row["pick_stroke"]),
                     ]
                 )
             )
@@ -429,6 +498,7 @@ def build_plan(
         "exported_rest_count": exported_rests,
         "generated_structural_rest_count": generated_rests,
         "tied_note_count": tied_notes,
+        "pick_stroke_event_count": pick_stroke_events,
     }
     return report
 

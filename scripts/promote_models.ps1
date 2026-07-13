@@ -15,6 +15,8 @@ $models = @{
     'score_event_locator\models\score_event_locator.pt' = 'score_event_locator.pt'
     'tab_detector\models\tab_symbol_detector.pt' = 'tab_symbol_detector.pt'
     'tie_events\models\tie_context_cnn.pt' = 'tie_context_cnn.pt'
+    'technique_events\models\technique_context_cnn.pt' = 'technique_context_cnn.pt'
+    'technique_events\models\pick_stroke_context_cnn.pt' = 'pick_stroke_context_cnn.pt'
 }
 
 New-Item -ItemType Directory -Force -Path $WeightsRoot | Out-Null

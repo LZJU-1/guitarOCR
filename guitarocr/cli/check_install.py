@@ -21,6 +21,8 @@ REQUIRED_WEIGHTS = (
     "score_event_locator.pt",
     "tab_symbol_detector.pt",
     "tie_context_cnn.pt",
+    "technique_context_cnn.pt",
+    "pick_stroke_context_cnn.pt",
 )
 
 

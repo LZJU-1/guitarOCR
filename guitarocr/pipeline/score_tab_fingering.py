@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from collections import Counter
 
 import numpy as np
 from PIL import Image
@@ -51,6 +52,31 @@ def detect_tab_fingering(
             measure["tab_events"] = group_symbols(
                 measure["tab_symbols"], system["tab_string_y"], system["tab_spacing"]
             )
+
+
+def recover_isolated_tab_events(systems: list[dict]) -> dict:
+    """Recover a whole-measure event when the score locator misses it.
+
+    Dead/X whole notes can have no conventional filled notehead, while their
+    TAB token remains unambiguous.  Only an otherwise empty measure with one
+    TAB event is recovered; crowded or ambiguous measures are left untouched.
+    The normal rhythm and technique classifiers then inspect the recovered x
+    position, so no duration or effect is guessed here.
+    """
+    summary = {"candidates": 0, "recovered": 0}
+    for system in systems:
+        for measure in system.get("measures", []):
+            if measure.get("events") or len(measure.get("tab_events", [])) != 1:
+                continue
+            summary["candidates"] += 1
+            tab_event = measure["tab_events"][0]
+            measure["events"] = [{
+                "x": float(tab_event["x"]),
+                "locator_confidence": 0.0,
+                "locator_source": "isolated_tab_event_recovery",
+            }]
+            summary["recovered"] += 1
+    return summary
 
 
 def compact_rhythm_voice(voice: dict) -> dict:
@@ -105,6 +131,17 @@ def build_score_ir(systems: list[dict], measure_number_offset: int | None = None
                         "source": "printed_tab",
                         "tie_in": False,
                         "tie_out": False,
+                        "dead": isinstance(note["fret"], str) and note["fret"].upper() == "X",
+                        "effects": {
+                            **score_event.get("technique_prediction", {}).get("positive", {}),
+                            # A dead/X note has no sustained pitch to modulate;
+                            # wavy slide-out marks can otherwise resemble vibrato.
+                            "vibrato": bool(
+                                score_event.get("technique_prediction", {})
+                                .get("positive", {}).get("vibrato", False)
+                            ) and not (isinstance(note["fret"], str) and note["fret"].upper() == "X"),
+                            "dead": isinstance(note["fret"], str) and note["fret"].upper() == "X",
+                        },
                     }
                     for note in tab_event["notes"]
                 ]
@@ -142,6 +179,7 @@ def build_score_ir(systems: list[dict], measure_number_offset: int | None = None
                         "tab_x_delta": delta if matched_index is not None else None,
                         "voices": voices,
                         "notes": notes,
+                        "technique_prediction": score_event.get("technique_prediction"),
                         "tie_relation": tie_relation,
                     }
                 )
@@ -204,12 +242,15 @@ def resolve_unambiguous_ties(score_ir: dict) -> dict:
                     previous = (measure, event)
                     continue
                 missing = int(relation["candidate_tie_count"])
-                can_resolve = (
-                    previous is not None
-                    and not event["notes"]
-                    and len(previous[1]["notes"]) == missing
-                    and missing > 0
-                )
+                attacked_strings = {int(note["string"]) for note in event["notes"]}
+                continuation_candidates: list[tuple[int, dict]] = []
+                if previous is not None:
+                    continuation_candidates = [
+                        (note_index, note)
+                        for note_index, note in enumerate(previous[1]["notes"])
+                        if int(note["string"]) not in attacked_strings
+                    ]
+                can_resolve = missing > 0 and len(continuation_candidates) == missing
                 if not can_resolve:
                     relation["status"] = "unresolved_partial_or_nonadjacent"
                     summary["unresolved_candidates"] += 1
@@ -217,12 +258,21 @@ def resolve_unambiguous_ties(score_ir: dict) -> dict:
                     continue
                 previous_measure, previous_event = previous
                 continued_notes = []
-                for note_index, source_note in enumerate(previous_event["notes"]):
+                for note_index, source_note in continuation_candidates:
                     source_note["tie_out"] = True
                     continued = copy.deepcopy(source_note)
                     continued["source"] = "tie_continuation"
                     continued["tie_in"] = True
                     continued["tie_out"] = False
+                    current_effects = (
+                        event.get("technique_prediction", {}).get("positive", {})
+                    )
+                    continued["effects"] = {
+                        **current_effects,
+                        "vibrato": bool(current_effects.get("vibrato", False))
+                        and not bool(source_note.get("dead")),
+                        "dead": bool(source_note.get("dead")),
+                    }
                     continued_notes.append(continued)
                     edges.append(
                         {
@@ -236,18 +286,68 @@ def resolve_unambiguous_ties(score_ir: dict) -> dict:
                                 "measure": measure["number"],
                                 "page_measure_index": measure["page_measure_index"],
                                 "event_order": event["order"],
-                                "note_index": note_index,
+                                "note_index": len(event["notes"]) + len(continued_notes) - 1,
                             },
                             "string": source_note["string"],
                             "fret": source_note["fret"],
-                            "method": "adjacent_full_event_score_tab_consistency",
+                            "method": "adjacent_partial_event_score_tab_consistency",
                         }
                     )
-                event["notes"] = continued_notes
-                relation["status"] = "auto_resolved_adjacent_full_event"
+                event["notes"].extend(continued_notes)
+                event["notes"].sort(key=lambda note: int(note["string"]))
+                relation["status"] = "auto_resolved_adjacent_partial_or_full_event"
                 summary["auto_resolved_events"] += 1
                 summary["auto_resolved_notes"] += len(continued_notes)
                 previous = (measure, event)
     score_ir["tie_edges"] = edges
     score_ir["tie_summary"] = summary
+    return summary
+
+
+def correct_multidigit_fret_outliers(score_ir: dict, window: int = 3) -> dict:
+    """Repair rare digit-join errors using same-string musical continuity.
+
+    A detector can merge a printed fret 2 with a nearby false-positive 3 into
+    23. We only remove the trailing digit when both neighbouring evidence and
+    the printed prefix strongly agree; genuine playing around frets 20--36 is
+    retained because its neighbours are high as well.
+    """
+    summary = {"candidates": 0, "corrected": 0}
+    for track in score_ir.get("tracks", []):
+        timeline: list[dict] = []
+        for measure in track.get("measures", []):
+            for event in measure.get("events", []):
+                for note in event.get("notes", []):
+                    if isinstance(note.get("fret"), int):
+                        timeline.append(note)
+        by_string: dict[int, list[dict]] = {}
+        for note in timeline:
+            by_string.setdefault(int(note["string"]), []).append(note)
+        for notes in by_string.values():
+            original = [int(note["fret"]) for note in notes]
+            support = Counter(original)
+            for index, fret in enumerate(original):
+                if not 20 <= fret <= 39:
+                    continue
+                summary["candidates"] += 1
+                prefix = fret // 10
+                neighbours = original[max(0, index - window):index] + original[index + 1:index + window + 1]
+                low = [value for value in neighbours if 0 <= value <= 19]
+                near_prefix = sum(abs(value - prefix) <= 2 for value in low)
+                near_original = sum(abs(value - fret) <= 4 for value in neighbours)
+                global_prefix_support = support[prefix] >= max(6, support[fret] * 3)
+                local_support = near_prefix >= 2
+                if (near_original and not global_prefix_support) or not (local_support or global_prefix_support):
+                    continue
+                notes[index]["fret_context_correction"] = {
+                    "from": fret,
+                    "to": prefix,
+                    "reason": "isolated_high_fret_digit_join",
+                    "low_neighbours": low,
+                    "global_prefix_support": support[prefix],
+                    "global_joined_support": support[fret],
+                }
+                notes[index]["fret"] = prefix
+                summary["corrected"] += 1
+    score_ir["fret_context_corrections"] = summary
     return summary

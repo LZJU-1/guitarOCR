@@ -269,6 +269,7 @@ def main() -> None:
     parser.add_argument("--database", type=Path, default=DATABASE_ROOT)
     parser.add_argument("--epochs", type=int, default=28)
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=2e-3)
     parser.add_argument("--seed", type=int, default=20260713)
     parser.add_argument("--init-checkpoint", type=Path, help="Optional compatible checkpoint for fine-tuning.")
@@ -289,15 +290,15 @@ def main() -> None:
         database, manifest_root / "validation.jsonl", classes, training=False
     )
     test_dataset = TabDetectorDataset(database, manifest_root / "test.jsonl", classes, training=False)
-    train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True
-    )
-    validation_loader = DataLoader(
-        validation_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True
-    )
-    test_loader = DataLoader(
-        test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True
-    )
+    loader_options = {
+        "batch_size": args.batch_size,
+        "num_workers": args.workers,
+        "pin_memory": torch.cuda.is_available(),
+        "persistent_workers": args.workers > 0,
+    }
+    train_loader = DataLoader(train_dataset, shuffle=True, **loader_options)
+    validation_loader = DataLoader(validation_dataset, shuffle=False, **loader_options)
+    test_loader = DataLoader(test_dataset, shuffle=False, **loader_options)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TabSymbolDetector(len(classes)).to(device)
@@ -376,6 +377,7 @@ def main() -> None:
                     "parameter_count": parameter_count,
                     "best_epoch": best_epoch,
                     "best_validation_f1_iou30": best_f1,
+                    "detection_threshold": 0.3,
                 },
                 checkpoint_path,
             )

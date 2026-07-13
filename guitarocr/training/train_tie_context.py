@@ -320,6 +320,8 @@ def main() -> None:
         initialization = f"{rhythm_checkpoint}; fine-tuned from {fine_tune_checkpoint}"
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
+    use_amp = device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     presence_values = [int(record["tie_present"]) for record in train_dataset.records]
     count_values = [min(6, int(record["tied_note_count"])) for record in train_dataset.records]
@@ -368,13 +370,16 @@ def main() -> None:
             note_counts = note_counts.to(device, non_blocking=True)
             y_targets = y_targets.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
-            loss, loss_parts = calculate_loss(
-                model(images), presence, counts, note_counts, y_targets,
-                presence_weights, count_weights, note_count_weights, y_positive_weights,
-            )
-            loss.backward()
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                loss, loss_parts = calculate_loss(
+                    model(images), presence, counts, note_counts, y_targets,
+                    presence_weights, count_weights, note_count_weights, y_positive_weights,
+                )
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             batch = images.shape[0]
             running_loss += float(loss) * batch
             seen += batch

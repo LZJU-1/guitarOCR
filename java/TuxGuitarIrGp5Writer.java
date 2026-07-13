@@ -38,12 +38,17 @@ import app.tuxguitar.song.models.TGSong;
 import app.tuxguitar.song.models.TGString;
 import app.tuxguitar.song.models.TGTrack;
 import app.tuxguitar.song.models.TGVoice;
+import app.tuxguitar.song.models.effects.TGEffectBend;
 import app.tuxguitar.util.TGContext;
 import app.tuxguitar.util.plugin.TGPlugin;
 
 /** Builds a minimal TuxGuitar song from GuitarOCR's deliberately simple TSV plan. */
 public final class TuxGuitarIrGp5Writer {
-    private record NotePlan(int string, int fret, boolean tied) {}
+    private record NotePlan(
+            int string, int fret, boolean tied, boolean dead, boolean vibrato,
+            boolean slide, boolean hammer, boolean bend, boolean ghost,
+            boolean accent, boolean palmMute, boolean staccato,
+            boolean letRing, boolean tapping) {}
     private record EventPlan(
             int measureIndex,
             int eventOrder,
@@ -54,7 +59,8 @@ public final class TuxGuitarIrGp5Writer {
             int divisionEnters,
             int divisionTimes,
             String state,
-            List<NotePlan> notes) {}
+            List<NotePlan> notes,
+            int pickStroke) {}
     private record MeasurePlan(int index, int sourceNumber, int numerator, int denominator) {}
     private record Plan(String title, int tempo, List<Integer> tuning,
                         List<MeasurePlan> measures, List<EventPlan> events) {}
@@ -139,7 +145,7 @@ public final class TuxGuitarIrGp5Writer {
             if (line.isBlank()) continue;
             String[] fields = line.split("\\t", -1);
             if (fields[0].equals("GUITAROCR_PLAN")) {
-                header = fields.length == 2 && fields[1].equals("1");
+                header = fields.length == 2 && (fields[1].equals("1") || fields[1].equals("2"));
             } else if (fields[0].equals("META")) {
                 if (fields[1].equals("TITLE_B64")) {
                     title = new String(Base64.getDecoder().decode(fields[2]), StandardCharsets.UTF_8);
@@ -157,17 +163,20 @@ public final class TuxGuitarIrGp5Writer {
                 List<NotePlan> notes = new ArrayList<>();
                 if (!fields[9].equals("-")) {
                     for (String encoded : fields[9].split(",")) {
-                        String[] note = encoded.split(":", 3);
+                        String[] note = encoded.split(":");
                         notes.add(new NotePlan(
-                                Integer.parseInt(note[0]), Integer.parseInt(note[1]), note[2].equals("1")));
+                                Integer.parseInt(note[0]), Integer.parseInt(note[1]), note[2].equals("1"),
+                                flag(note, 3), flag(note, 4), flag(note, 5), flag(note, 6),
+                                flag(note, 7), flag(note, 8), flag(note, 9), flag(note, 10),
+                                flag(note, 11), flag(note, 12), flag(note, 13)));
                     }
                 }
                 events.add(new EventPlan(
                         Integer.parseInt(fields[1]), Integer.parseInt(fields[2]),
                         Long.parseLong(fields[3]), Long.parseLong(fields[4]),
-                        Integer.parseInt(fields[5]), fields[6],
-                        Integer.parseInt(division[0]), Integer.parseInt(division[1]),
-                        fields[8], notes));
+                         Integer.parseInt(fields[5]), fields[6],
+                         Integer.parseInt(division[0]), Integer.parseInt(division[1]),
+                         fields[8], notes, fields.length >= 11 ? Integer.parseInt(fields[10]) : 0));
             }
         }
         if (!header) throw new IllegalArgumentException("Unsupported or missing GuitarOCR plan header");
@@ -175,6 +184,10 @@ public final class TuxGuitarIrGp5Writer {
         if (tuning.isEmpty()) throw new IllegalArgumentException("Plan has no tuning");
         measures.sort(Comparator.comparingInt(MeasurePlan::index));
         return new Plan(title, tempo, tuning, measures, events);
+    }
+
+    private static boolean flag(String[] fields, int index) {
+        return fields.length > index && fields[index].equals("1");
     }
 
     private static TGSong buildSong(Plan plan, TGSongManager manager) {
@@ -215,6 +228,7 @@ public final class TuxGuitarIrGp5Writer {
             long relativePrecise = fractionOfWholeToPrecise(item.onsetNumerator(), item.onsetDenominator());
             beat.setStart(measure.getStart() + relativeStart);
             beat.setPreciseStart(measure.getPreciseStart() + relativePrecise);
+            beat.getPickStroke().setDirection(item.pickStroke());
             TGVoice voice = beat.getVoice(0);
             if (voice == null) {
                 voice = factory.newVoice(0);
@@ -234,6 +248,24 @@ public final class TuxGuitarIrGp5Writer {
                     note.setValue(notePlan.fret());
                     note.setTiedNote(notePlan.tied());
                     note.setVelocity(95);
+                    note.getEffect().setVibrato(notePlan.vibrato());
+                    note.getEffect().setSlide(notePlan.slide());
+                    note.getEffect().setHammer(notePlan.hammer());
+                    note.getEffect().setGhostNote(notePlan.ghost());
+                    note.getEffect().setAccentuatedNote(notePlan.accent());
+                    note.getEffect().setPalmMute(notePlan.palmMute());
+                    note.getEffect().setStaccato(notePlan.staccato());
+                    note.getEffect().setLetRing(notePlan.letRing());
+                    note.getEffect().setTapping(notePlan.tapping());
+                    if (notePlan.bend()) {
+                        TGEffectBend bend = factory.newEffectBend();
+                        bend.addPoint(0, 0);
+                        bend.addPoint(TGEffectBend.MAX_POSITION_LENGTH, 2 * TGEffectBend.SEMITONE_LENGTH);
+                        note.getEffect().setBend(bend);
+                    }
+                    // TGNoteEffect treats slide and dead-note as mutually exclusive.
+                    // Apply dead last as a safety net so an X is never emitted as 0.
+                    note.getEffect().setDeadNote(notePlan.dead());
                     voice.addNote(note);
                 }
             }
@@ -373,6 +405,7 @@ public final class TuxGuitarIrGp5Writer {
                 if (voice.getDuration().isDoubleDotted() != expected.dot().equals("double")) continue;
                 if (voice.getDuration().getDivision().getEnters() != expected.divisionEnters()) continue;
                 if (voice.getDuration().getDivision().getTimes() != expected.divisionTimes()) continue;
+                if (beat.getPickStroke().getDirection() != expected.pickStroke()) continue;
                 if (!notesMatch(expected, voice)) continue;
                 matches++;
                 matched = true;
@@ -388,10 +421,17 @@ public final class TuxGuitarIrGp5Writer {
                             .append(" dot=").append(voice.getDuration().isDotted())
                             .append(" div=").append(voice.getDuration().getDivision().getEnters())
                             .append(":").append(voice.getDuration().getDivision().getTimes())
-                            .append(" rest=").append(voice.isRestVoice()).append(" notes=");
+                            .append(" rest=").append(voice.isRestVoice())
+                            .append(" pick=").append(beat.getPickStroke().getDirection())
+                            .append(" notes=");
                     for (TGNote note : voice.getNotes()) {
                         actualAtStart.append(note.getString()).append(":").append(note.getValue())
-                                .append(":").append(note.isTiedNote()).append(",");
+                                .append(":").append(note.isTiedNote())
+                                .append(":dead=").append(note.getEffect().isDeadNote())
+                                .append(":slide=").append(note.getEffect().isSlide())
+                                .append(":vibrato=").append(note.getEffect().isVibrato())
+                                .append(":palm=").append(note.getEffect().isPalmMute())
+                                .append(",");
                     }
                     actualAtStart.append("]");
                 }
@@ -409,20 +449,33 @@ public final class TuxGuitarIrGp5Writer {
     private static boolean notesMatch(EventPlan expected, TGVoice actual) {
         if (expected.state().endsWith("rest")) return actual.isRestVoice();
         if (actual.countNotes() != expected.notes().size()) return false;
-        List<String> expectedNotes = new ArrayList<>();
-        for (NotePlan note : expected.notes()) {
-            expectedNotes.add(note.tied()
-                    ? note.string() + ":T"
-                    : note.string() + ":" + note.fret() + ":false");
+        for (NotePlan expectedNote : expected.notes()) {
+            TGNote actualNote = null;
+            for (TGNote candidate : actual.getNotes()) {
+                if (candidate.getString() == expectedNote.string()) {
+                    actualNote = candidate;
+                    break;
+                }
+            }
+            if (actualNote == null) return false;
+            if (actualNote.isTiedNote() != expectedNote.tied()) return false;
+            if (!expectedNote.tied() && actualNote.getValue() != expectedNote.fret()) return false;
+            if (!effectsMatch(expectedNote, actualNote)) return false;
         }
-        List<String> actualNotes = new ArrayList<>();
-        for (TGNote note : actual.getNotes()) {
-            actualNotes.add(note.isTiedNote()
-                    ? note.getString() + ":T"
-                    : note.getString() + ":" + note.getValue() + ":false");
-        }
-        Collections.sort(expectedNotes);
-        Collections.sort(actualNotes);
-        return expectedNotes.equals(actualNotes);
+        return true;
+    }
+
+    private static boolean effectsMatch(NotePlan expected, TGNote actual) {
+        return actual.getEffect().isDeadNote() == expected.dead()
+                && actual.getEffect().isVibrato() == expected.vibrato()
+                && actual.getEffect().isSlide() == expected.slide()
+                && actual.getEffect().isHammer() == expected.hammer()
+                && actual.getEffect().isBend() == expected.bend()
+                && actual.getEffect().isGhostNote() == expected.ghost()
+                && actual.getEffect().isAccentuatedNote() == expected.accent()
+                && actual.getEffect().isPalmMute() == expected.palmMute()
+                && actual.getEffect().isStaccato() == expected.staccato()
+                && actual.getEffect().isLetRing() == expected.letRing()
+                && actual.getEffect().isTapping() == expected.tapping();
     }
 }

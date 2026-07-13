@@ -344,3 +344,74 @@ only adjacent, full-event continuations with no new TAB attack. Nine test notes
 are resolved and all nine are correct, covering 39.13% of the 23 tied test
 notes. All ambiguous partial, non-adjacent and cross-system relations remain
 explicit candidates for the later notehead/TAB association stage.
+
+## Current production path (2026-07-14)
+
+The implemented production path is now:
+
+```text
+score_tab PDF
+  -> Poppler page raster
+  -> staff/system/measure geometry
+  -> event-column locator
+  -> rhythm + TAB digit/X + tie + technique CNNs
+  -> score/TAB association
+  -> exact-rational measure constraint and document context
+  -> Score Event IR
+  -> GP5 plan
+  -> TuxGuitar GP5 write/readback validation
+  -> optional preview PDF
+```
+
+The readback validator checks every planned measure and event, including onset,
+duration, dot/division, string/fret, tie state, and GP5-representable note
+effects. It fails the export instead of reporting success when TuxGuitar changes
+the data during serialization. TuxGuitar's GP5 model makes dead-note and slide
+mutually exclusive on one note; the exporter preserves the visible X, records
+the downgrade, and leaves both meanings intact in IR.
+
+The rhythm model now covers double dots and tuplets. A measure-level dynamic
+program searches the CNN alternatives for an exact rational fill. A deliberately
+narrow unique-candidate closure is permitted only when one non-destructive
+candidate fills an otherwise invalid measure with sufficient model probability.
+This keeps the correction auditable in `rhythm_audit` rather than turning the
+constraint solver into an unconstrained score generator.
+
+TAB association handles multi-digit frets, isolated single TAB events, missing
+glyphs on tie continuations, partial chord ties, and current-event technique
+predictions. Technique recognition uses compact multi-label event CNNs; it is
+useful for common dead, palm-mute, vibrato and bend cases but remains a long-tail
+problem, especially for slide/ghost/accent. Exact GP7/8 GPIF labels can augment
+renderer-derived training semantics. Beat-level up/down PickStroke labels use a
+second checkpoint that only overrides those two outputs, avoiding regression in
+the original 13 note-effect classes. A narrow sequence pass suppresses pick
+strokes on rests, resolves dual-direction logits, and fills a single hole only
+inside an otherwise strict alternate-picking run with supporting visual probability.
+
+### Three-layout boundary
+
+Page geometry classifies TuxGuitar renders as `score_tab`, `tab_only`, or
+`score_only`:
+
+- `score_tab` is the only complete PDF-to-GP path. Standard notation anchors
+  time/rhythm, and TAB resolves guitar string/fret.
+- `tab_only` has implemented staff/measure geometry, digit/X detection, and
+  event grouping. Its rhythm dataset and inference groundwork exist, but a
+  reliable rhythm-to-GP path is not yet the default.
+- `score_only` can be classified but cannot uniquely determine guitar fingering:
+  one written pitch often has several valid string/fret realizations. It needs a
+  learned fingering prior or explicit user constraints before exact GP output.
+
+This boundary is surfaced in the README and CLI rather than silently routing all
+three layouts through a model trained for paired score/TAB pages.
+
+### Why the default context model is not a 1B document VLM
+
+GLM-OCR 0.9B and HunyuanOCR are general document OCR models. Their token output
+does not directly supervise the precise event x coordinate, voice, rational
+duration, string, fret, or cross-event relation required here. The released
+runtime therefore remains seven task-specific CNN checkpoints totaling about
+17.4 MiB plus deterministic music constraints. General OCR/VLMs may help as
+offline weak-label teachers, metadata OCR, or failure-page routers. A future
+10--30M event-sequence Transformer over CNN features is a better-sized model for
+musical context and can be distilled from exact GP sequences.

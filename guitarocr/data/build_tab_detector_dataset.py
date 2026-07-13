@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -133,6 +134,7 @@ def main() -> None:
         for record in source_records
     }
     page_labels = sorted((database / "labels" / "pages" / "tab_only").glob("*/*.json"))
+    page_labels.extend(sorted((database / "labels" / "pages" / "score_tab_symbols").glob("*/*.json")))
     if not page_labels:
         raise FileNotFoundError("No page-level TAB labels found. Run build_tuxguitar_page_annotations.ps1 first.")
 
@@ -142,6 +144,7 @@ def main() -> None:
     for page_label_path in page_labels:
         page_label = json.loads(page_label_path.read_text(encoding="utf-8"))
         source_id = page_label["source_id"]
+        layout = page_label.get("layout", "tab_only")
         split = source_splits[source_id]
         source_counts[split].add(source_id)
         page_image_path = database / page_label["image"]
@@ -149,13 +152,21 @@ def main() -> None:
             page_image = opened.convert("L")
 
         for measure in page_label["measures"]:
-            base_id = f"{source_id}_p{page_label['page_index']:03d}_m{measure['measure_number']:03d}"
+            base_id = (
+                f"{source_id}_{layout}_p{page_label['page_index']:03d}_"
+                f"m{measure['measure_number']:03d}"
+            )
             tiles = tile_measure(page_image, measure["tab_staff"]["bbox"], measure["symbols"])
             for tile_index, (image, symbols, transform) in enumerate(tiles):
                 sample_id = f"{base_id}_w{tile_index:02d}"
                 image_path = dataset_root / split / "images" / f"{sample_id}.png"
                 label_path = dataset_root / split / "labels" / f"{sample_id}.json"
-                image.save(image_path, format="PNG", optimize=True)
+                # These generated crops are disposable training data. Low PNG
+                # compression is substantially faster than the optimizer and
+                # leaves pixel values unchanged.
+                temporary_image = image_path.with_suffix(f".png.tmp.{os.getpid()}")
+                image.save(temporary_image, format="PNG", compress_level=1)
+                temporary_image.replace(image_path)
                 for symbol in symbols:
                     class_counts[symbol["class"]] += 1
 
@@ -163,6 +174,7 @@ def main() -> None:
                     "schema_version": "1.1",
                     "sample_id": sample_id,
                     "source_id": source_id,
+                    "layout": layout,
                     "split": split,
                     "page_index": page_label["page_index"],
                     "measure_index": measure["measure_index"],
@@ -173,11 +185,15 @@ def main() -> None:
                     "transform": transform,
                     "symbols": symbols,
                 }
-                label_path.write_text(json.dumps(label, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                label_text = json.dumps(label, ensure_ascii=False, indent=2) + "\n"
+                temporary_label = label_path.with_suffix(f".json.tmp.{os.getpid()}")
+                temporary_label.write_text(label_text, encoding="utf-8")
+                temporary_label.replace(label_path)
                 records_by_split[split].append(
                     {
                         "sample_id": sample_id,
                         "source_id": source_id,
+                        "layout": layout,
                         "split": split,
                         "image": image_path.relative_to(database).as_posix(),
                         "label": label_path.relative_to(database).as_posix(),

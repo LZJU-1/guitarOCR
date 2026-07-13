@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 from collections import Counter
 from pathlib import Path
@@ -31,12 +32,13 @@ def clean_files(directory: Path, pattern: str) -> None:
             path.unlink()
 
 
-def convert_source(database: Path, layout_path: Path) -> list[dict]:
+def convert_source(database: Path, layout_path: Path, layout: str) -> list[dict]:
     source = json.loads(layout_path.read_text(encoding="utf-8"))
     source_id = source["source_id"]
-    image_root = database / "output" / "images" / "tab_only" / source_id
-    label_root = database / "labels" / "pages" / "tab_only" / source_id
-    overlay_root = database / "output" / "annotation_overlays" / "tab_only" / source_id
+    image_root = database / "output" / "images" / layout / source_id
+    label_group = "tab_only" if layout == "tab_only" else "score_tab_symbols"
+    label_root = database / "labels" / "pages" / label_group / source_id
+    overlay_root = database / "output" / "annotation_overlays" / label_group / source_id
     clean_files(label_root, "page_*.json")
     clean_files(overlay_root, "page_*.png")
 
@@ -62,6 +64,7 @@ def convert_source(database: Path, layout_path: Path) -> list[dict]:
             staff_bbox = scale_bbox(measure["tab_staff"]["bbox"], sx, sy)
             string_y = [value * sy for value in measure["tab_staff"]["string_y"]]
             symbols: list[dict] = []
+            events: list[dict] = []
 
             draw.rectangle(xyxy(measure_bbox), outline=(0, 170, 255), width=2)
             draw.rectangle(xyxy(staff_bbox), outline=(0, 180, 70), width=2)
@@ -86,6 +89,16 @@ def convert_source(database: Path, layout_path: Path) -> list[dict]:
                 color = (230, 40, 40) if symbol["class"].startswith("digit_") else (220, 0, 200)
                 draw.rectangle(xyxy(bbox), outline=color, width=2)
 
+            for event in measure.get("events", []):
+                copied = dict(event)
+                copied["x"] = float(event["x"]) * sx
+                events.append(copied)
+                draw.line(
+                    (copied["x"], string_y[0] - 5 * (string_y[1] - string_y[0]),
+                     copied["x"], string_y[-1] + 5 * (string_y[1] - string_y[0])),
+                    fill=(255, 140, 0), width=1,
+                )
+
             output_measures.append(
                 {
                     "measure_index": measure["measure_index"],
@@ -93,6 +106,7 @@ def convert_source(database: Path, layout_path: Path) -> list[dict]:
                     "bbox": measure_bbox,
                     "tab_staff": {"bbox": staff_bbox, "string_y": string_y},
                     "symbols": symbols,
+                    "events": events,
                 }
             )
 
@@ -102,7 +116,7 @@ def convert_source(database: Path, layout_path: Path) -> list[dict]:
         page_label = {
             "schema_version": "1.0",
             "source_id": source_id,
-            "layout": "tab_only",
+            "layout": layout,
             "page_index": page_index,
             "image": image_path.relative_to(database).as_posix(),
             "image_size": {"width": width, "height": height},
@@ -117,12 +131,12 @@ def convert_source(database: Path, layout_path: Path) -> list[dict]:
         label_path = label_root / f"page_{page_index:03d}.json"
         overlay_path = overlay_root / f"page_{page_index:03d}.png"
         label_path.write_text(json.dumps(page_label, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        overlay.save(overlay_path, format="PNG", optimize=True)
+        overlay.save(overlay_path, format="PNG", compress_level=1)
         records.append(
             {
-                "sample_id": f"{source_id}_tab_only_p{page_index:03d}",
+                "sample_id": f"{source_id}_{layout}_p{page_index:03d}",
                 "source_id": source_id,
-                "layout": "tab_only",
+                "layout": layout,
                 "page_index": page_index,
                 "image": image_path.relative_to(database).as_posix(),
                 "label": label_path.relative_to(database).as_posix(),
@@ -140,10 +154,13 @@ def main() -> None:
     )
     parser.add_argument("--database", type=Path, default=DATABASE_ROOT)
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--layout", choices=("tab_only", "score_tab"), default="tab_only")
     args = parser.parse_args()
 
     database = args.database.resolve()
-    layout_root = database / "labels" / "layout" / "tab_only"
+    layout_group = "tab_only" if args.layout == "tab_only" else "score_tab_symbols"
+    layout_root = database / "labels" / "layout" / layout_group
     layout_paths = sorted(layout_root.glob("*.json"))
     if args.limit > 0:
         layout_paths = layout_paths[: args.limit]
@@ -151,10 +168,16 @@ def main() -> None:
         raise FileNotFoundError(f"No TuxGuitar layout labels found in {layout_root}")
 
     records: list[dict] = []
-    for layout_path in layout_paths:
-        records.extend(convert_source(database, layout_path))
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
+        futures = [pool.submit(convert_source, database, path, args.layout) for path in layout_paths]
+        for index, future in enumerate(as_completed(futures), start=1):
+            records.extend(future.result())
+            if index % 20 == 0 or index == len(futures):
+                print(f"BUILT_TAB_PAGE_SOURCES={index}/{len(futures)}", flush=True)
+    records.sort(key=lambda record: record["sample_id"])
 
-    manifest_path = database / "manifests" / "tab_symbol_annotations.jsonl"
+    manifest_prefix = "tab_symbol" if args.layout == "tab_only" else "score_tab_symbol"
+    manifest_path = database / "manifests" / f"{manifest_prefix}_annotations.jsonl"
     manifest_path.write_text(
         "".join(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n" for record in records),
         encoding="utf-8",
@@ -165,9 +188,10 @@ def main() -> None:
         "page_count": len(records),
         "measure_count": sum(record["measure_count"] for record in records),
         "symbol_count": sum(record["symbol_count"] for record in records),
-        "scope": "TuxGuitar 2.0.1 tab_only digit/X detection ground truth",
+        "layout": args.layout,
+        "scope": f"TuxGuitar 2.0.1 {args.layout} digit/X detection ground truth",
     }
-    summary_path = database / "manifests" / "tab_symbol_annotation_summary.json"
+    summary_path = database / "manifests" / f"{manifest_prefix}_annotation_summary.json"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False))
 

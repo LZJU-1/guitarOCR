@@ -105,9 +105,13 @@ public final class TuxGuitarTabAnnotationBuilder {
         }
     }
 
-    private void run(Path databaseRoot, int limit) throws Exception {
+    private void run(Path databaseRoot, int limit, String layoutName) throws Exception {
         Path sourceRoot = databaseRoot.resolve("source/gp");
-        Path outputRoot = databaseRoot.resolve("labels/layout/tab_only");
+        if (!layoutName.equals("tab_only") && !layoutName.equals("score_tab")) {
+            throw new IllegalArgumentException("Unsupported layout: " + layoutName);
+        }
+        Path outputRoot = databaseRoot.resolve(
+                layoutName.equals("tab_only") ? "labels/layout/tab_only" : "labels/layout/score_tab_symbols");
         Files.createDirectories(outputRoot);
 
         List<Path> sources;
@@ -136,7 +140,7 @@ public final class TuxGuitarTabAnnotationBuilder {
                 throw new IOException("No supported guitar/bass track in " + source);
             }
 
-            AnnotationCollector collector = createAnnotations(sourceId, loaded.song(), track);
+            AnnotationCollector collector = createAnnotations(sourceId, loaded.song(), track, layoutName);
             Path output = outputRoot.resolve(sourceId + ".json");
             Files.writeString(output, collector.toJson(track.getNumber()), StandardCharsets.UTF_8);
 
@@ -199,11 +203,15 @@ public final class TuxGuitarTabAnnotationBuilder {
         return fallback;
     }
 
-    private AnnotationCollector createAnnotations(String sourceId, TGSong song, TGTrack selectedTrack)
+    private AnnotationCollector createAnnotations(
+            String sourceId, TGSong song, TGTrack selectedTrack, String layoutName)
             throws Exception {
         int style = TGLayout.DISPLAY_COMPACT
                 | TGLayout.DISPLAY_MODE_BLACK_WHITE
                 | TGLayout.DISPLAY_TABLATURE;
+        if (layoutName.equals("score_tab")) {
+            style |= TGLayout.DISPLAY_SCORE;
+        }
         TGPrintSettings settings = new TGPrintSettings();
         settings.setStyle(style);
         settings.setFromMeasure(1);
@@ -216,7 +224,7 @@ public final class TuxGuitarTabAnnotationBuilder {
         PDFResourceFactory factory = new PDFResourceFactory();
         TGController controller = new TGPrintController(clonedSong, clonedManager, factory, styles);
 
-        AnnotationCollector collector = new AnnotationCollector(sourceId);
+        AnnotationCollector collector = new AnnotationCollector(sourceId, layoutName);
         TrackingPrintDocument document = new TrackingPrintDocument(new PDFDocument(
                 this.context,
                 new UISize(PAGE_WIDTH, PAGE_HEIGHT),
@@ -280,8 +288,18 @@ public final class TuxGuitarTabAnnotationBuilder {
             for (TGBeat beatBase : measure.getBeats()) {
                 TGBeatImpl beat = (TGBeatImpl) beatBase;
                 float eventX = contentX + (2f * getScale()) + beat.getPosX() + beat.getSpacing(this);
+                EventAnnotation event = new EventAnnotation(
+                        String.format(Locale.ROOT, "m%03d_b%03d", measureNumber, beatIndex),
+                        beat.getStart(), beat.getPreciseStart(), beatIndex, eventX);
                 for (int voiceIndex = 0; voiceIndex < beat.countVoices(); voiceIndex++) {
                     TGVoice voice = beat.getVoice(voiceIndex);
+                    if (voice != null) {
+                        TGDuration duration = voice.getDuration();
+                        event.voices.add(new VoiceAnnotation(
+                                voiceIndex, !voice.isEmpty(), voice.isRestVoice(),
+                                duration.getValue(), duration.isDotted(), duration.isDoubleDotted(),
+                                duration.getDivision().getEnters(), duration.getDivision().getTimes()));
+                    }
                     if (voice == null || voice.isEmpty() || voice.isRestVoice()) {
                         continue;
                     }
@@ -295,6 +313,7 @@ public final class TuxGuitarTabAnnotationBuilder {
                         noteIndex++;
                     }
                 }
+                annotation.events.add(event);
                 beatIndex++;
             }
             this.collector.add(pageIndex, annotation);
@@ -359,10 +378,12 @@ public final class TuxGuitarTabAnnotationBuilder {
 
     private static final class AnnotationCollector {
         private final String sourceId;
+        private final String layoutName;
         private final Map<Integer, List<MeasureAnnotation>> pages = new LinkedHashMap<>();
 
-        AnnotationCollector(String sourceId) {
+        AnnotationCollector(String sourceId, String layoutName) {
             this.sourceId = sourceId;
+            this.layoutName = layoutName;
         }
 
         void add(int page, MeasureAnnotation measure) {
@@ -385,7 +406,7 @@ public final class TuxGuitarTabAnnotationBuilder {
             out.append("{\n");
             out.append("  \"schema_version\": \"1.0\",\n");
             out.append("  \"source_id\": ").append(quote(this.sourceId)).append(",\n");
-            out.append("  \"layout\": \"tab_only\",\n");
+            out.append("  \"layout\": ").append(quote(this.layoutName)).append(",\n");
             out.append("  \"target_track_number\": ").append(trackNumber).append(",\n");
             out.append("  \"coordinate_space\": {\"name\": \"tuxguitar_pdf_top_left\", ")
                     .append("\"width\": 550.0, \"height\": 800.0},\n");
@@ -425,6 +446,32 @@ public final class TuxGuitarTabAnnotationBuilder {
             for (int i = 0; i < measure.symbols.size(); i++) {
                 if (i > 0) out.append(',');
                 appendSymbol(out, measure.symbols.get(i));
+            }
+            out.append("], \"events\": [");
+            for (int i = 0; i < measure.events.size(); i++) {
+                if (i > 0) out.append(',');
+                appendEvent(out, measure.events.get(i));
+            }
+            out.append("]}");
+        }
+
+        private static void appendEvent(StringBuilder out, EventAnnotation event) {
+            out.append("{\"event_id\":").append(quote(event.eventId))
+                    .append(",\"beat_start\":").append(event.beatStart)
+                    .append(",\"precise_start\":").append(event.preciseStart)
+                    .append(",\"beat_index\":").append(event.beatIndex)
+                    .append(",\"x\":").append(number(event.x)).append(",\"voices\":[");
+            for (int i = 0; i < event.voices.size(); i++) {
+                if (i > 0) out.append(',');
+                VoiceAnnotation voice = event.voices.get(i);
+                out.append("{\"voice_index\":").append(voice.voiceIndex)
+                        .append(",\"visible\":").append(voice.visible)
+                        .append(",\"rest\":").append(voice.rest)
+                        .append(",\"duration_value\":").append(voice.durationValue)
+                        .append(",\"dotted\":").append(voice.dotted)
+                        .append(",\"double_dotted\":").append(voice.doubleDotted)
+                        .append(",\"division_enters\":").append(voice.divisionEnters)
+                        .append(",\"division_times\":").append(voice.divisionTimes).append('}');
             }
             out.append("]}");
         }
@@ -468,6 +515,26 @@ public final class TuxGuitarTabAnnotationBuilder {
             String className, Rect bbox, float centerX, float centerY, String eventId,
             long beatStart, int beatIndex, int voiceIndex, int noteIndex, int stringNumber,
             int fret, int glyphIndex, int glyphCount, boolean ghost) {}
+    private record VoiceAnnotation(int voiceIndex, boolean visible, boolean rest,
+            int durationValue, boolean dotted, boolean doubleDotted,
+            int divisionEnters, int divisionTimes) {}
+
+    private static final class EventAnnotation {
+        final String eventId;
+        final long beatStart;
+        final long preciseStart;
+        final int beatIndex;
+        final float x;
+        final List<VoiceAnnotation> voices = new ArrayList<>();
+
+        EventAnnotation(String eventId, long beatStart, long preciseStart, int beatIndex, float x) {
+            this.eventId = eventId;
+            this.beatStart = beatStart;
+            this.preciseStart = preciseStart;
+            this.beatIndex = beatIndex;
+            this.x = x;
+        }
+    }
 
     private static final class MeasureAnnotation {
         final int measureIndex;
@@ -476,6 +543,7 @@ public final class TuxGuitarTabAnnotationBuilder {
         final Rect tabStaff;
         final List<Float> stringY;
         final List<SymbolAnnotation> symbols = new ArrayList<>();
+        final List<EventAnnotation> events = new ArrayList<>();
 
         MeasureAnnotation(int measureIndex, int measureNumber, Rect bbox, Rect tabStaff, List<Float> stringY) {
             this.measureIndex = measureIndex;
@@ -487,7 +555,7 @@ public final class TuxGuitarTabAnnotationBuilder {
     }
 
     private static void usage() {
-        System.out.println("Usage: TuxGuitarTabAnnotationBuilder <database-root> [limit]");
+        System.out.println("Usage: TuxGuitarTabAnnotationBuilder <database-root> [limit] [tab_only|score_tab]");
     }
 
     public static void main(String[] args) throws Exception {
@@ -497,9 +565,10 @@ public final class TuxGuitarTabAnnotationBuilder {
         }
         Path databaseRoot = Path.of(args[0]).toAbsolutePath().normalize();
         int limit = args.length >= 2 ? Integer.parseInt(args[1]) : 0;
+        String layoutName = args.length >= 3 ? args[2] : "tab_only";
         TuxGuitarTabAnnotationBuilder builder = new TuxGuitarTabAnnotationBuilder();
         try {
-            builder.run(databaseRoot, limit);
+            builder.run(databaseRoot, limit, layoutName);
         } finally {
             builder.disconnectPlugins();
         }

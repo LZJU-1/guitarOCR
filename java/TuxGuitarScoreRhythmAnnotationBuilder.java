@@ -289,7 +289,8 @@ public final class TuxGuitarScoreRhythmAnnotationBuilder {
                 float eventX = contentX + (2f * getScale()) + beat.getPosX() + beat.getSpacing(this);
                 EventAnnotation event = new EventAnnotation(
                         String.format(Locale.ROOT, "m%03d_b%03d", measureNumber, beatIndex),
-                        beat.getStart(), beat.getPreciseStart(), beatIndex, eventX);
+                        beat.getStart(), beat.getPreciseStart(), beatIndex, eventX,
+                        beat.getPickStroke().getDirection());
                 for (int voiceIndex = 0; voiceIndex < beat.countVoices(); voiceIndex++) {
                     TGVoice voiceBase = beat.getVoice(voiceIndex);
                     if (voiceBase == null) continue;
@@ -325,6 +326,19 @@ public final class TuxGuitarScoreRhythmAnnotationBuilder {
                                 note.getString(),
                                 note.getValue(),
                                 note.isTiedNote(),
+                                note.getEffect().isDeadNote(),
+                                note.getEffect().isVibrato(),
+                                note.getEffect().isBend(),
+                                note.getEffect().isHammer(),
+                                note.getEffect().isSlide(),
+                                note.getEffect().isGhostNote(),
+                                note.getEffect().isAccentuatedNote() || note.getEffect().isHeavyAccentuatedNote(),
+                                note.getEffect().isHarmonic(),
+                                note.getEffect().isGrace(),
+                                note.getEffect().isPalmMute(),
+                                note.getEffect().isStaccato(),
+                                note.getEffect().isLetRing(),
+                                note.getEffect().isTapping(),
                                 centerY,
                                 new Rect(eventX - noteWidth / 2f, centerY - noteHeight / 2f,
                                         noteWidth, noteHeight)));
@@ -444,6 +458,7 @@ public final class TuxGuitarScoreRhythmAnnotationBuilder {
                     .append(",\"precise_start\":").append(event.preciseStart)
                     .append(",\"beat_index\":").append(event.beatIndex)
                     .append(",\"x\":").append(number(event.x))
+                    .append(",\"pick_stroke\":").append(event.pickStroke)
                     .append(",\"voices\":[");
             for (int i = 0; i < event.voices.size(); i++) {
                 if (i > 0) out.append(',');
@@ -476,6 +491,20 @@ public final class TuxGuitarScoreRhythmAnnotationBuilder {
                         .append(",\"string\":").append(note.stringNumber)
                         .append(",\"fret\":").append(note.fret)
                         .append(",\"tied\":").append(note.tied)
+                        .append(",\"effects\":{")
+                        .append("\"dead\":").append(note.dead).append(',')
+                        .append("\"vibrato\":").append(note.vibrato).append(',')
+                        .append("\"bend\":").append(note.bend).append(',')
+                        .append("\"hammer\":").append(note.hammer).append(',')
+                        .append("\"slide\":").append(note.slide).append(',')
+                        .append("\"ghost\":").append(note.ghost).append(',')
+                        .append("\"accent\":").append(note.accent).append(',')
+                        .append("\"harmonic\":").append(note.harmonic).append(',')
+                        .append("\"grace\":").append(note.grace).append(',')
+                        .append("\"palm_mute\":").append(note.palmMute).append(',')
+                        .append("\"staccato\":").append(note.staccato).append(',')
+                        .append("\"let_ring\":").append(note.letRing).append(',')
+                        .append("\"tapping\":").append(note.tapping).append('}')
                         .append(",\"center_y\":").append(number(note.centerY))
                         .append(",\"bbox\":");
                 appendRect(out, note.bbox);
@@ -507,6 +536,9 @@ public final class TuxGuitarScoreRhythmAnnotationBuilder {
 
     private record Rect(float x, float y, float width, float height) {}
     private record NoteAnnotation(int noteIndex, int stringNumber, int fret, boolean tied,
+            boolean dead, boolean vibrato, boolean bend, boolean hammer, boolean slide,
+            boolean ghost, boolean accent, boolean harmonic, boolean grace, boolean palmMute,
+            boolean staccato, boolean letRing, boolean tapping,
             float centerY, Rect bbox) {}
 
     private static final class VoiceAnnotation {
@@ -555,14 +587,17 @@ public final class TuxGuitarScoreRhythmAnnotationBuilder {
         final long preciseStart;
         final int beatIndex;
         final float x;
+        final int pickStroke;
         final List<VoiceAnnotation> voices = new ArrayList<>();
 
-        EventAnnotation(String eventId, long beatStart, long preciseStart, int beatIndex, float x) {
+        EventAnnotation(String eventId, long beatStart, long preciseStart, int beatIndex, float x,
+                int pickStroke) {
             this.eventId = eventId;
             this.beatStart = beatStart;
             this.preciseStart = preciseStart;
             this.beatIndex = beatIndex;
             this.x = x;
+            this.pickStroke = pickStroke;
         }
     }
 

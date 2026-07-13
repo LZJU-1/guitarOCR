@@ -13,10 +13,14 @@ from guitarocr.data.build_score_rhythm_dataset import build_event_crop
 from guitarocr.models.rhythm_context_model import RhythmContextCNN
 from guitarocr.models.score_event_locator_model import ScoreEventLocator
 from guitarocr.models.tab_detector_model import TabSymbolDetector
+from guitarocr.models.technique_context_model import TechniqueContextCNN
 from guitarocr.paths import DATABASE_ROOT, WEIGHTS_ROOT
 from guitarocr.pipeline.infer_rhythm_event import TASKS, decode_head
 from guitarocr.pipeline.measure_rhythm_constraints import audit_score_ir
-from guitarocr.pipeline.score_tab_fingering import build_score_ir, detect_tab_fingering, resolve_unambiguous_ties
+from guitarocr.pipeline.score_tab_fingering import (
+    build_score_ir, detect_tab_fingering, recover_isolated_tab_events,
+    resolve_unambiguous_ties,
+)
 from guitarocr.pipeline.score_tab_geometry import detect_score_tab_geometry
 from guitarocr.pipeline.tie_inference import classify_ties, load_tie_model
 from guitarocr.pipeline.time_signature_recognizer import load_atomic_model, propagate_time_signatures
@@ -84,6 +88,12 @@ def classify_rhythm(
     model: RhythmContextCNN,
     device: torch.device,
     crop_root: Path | None,
+    technique_model: TechniqueContextCNN | None = None,
+    technique_classes: list[str] | None = None,
+    technique_thresholds: list[float] | None = None,
+    pick_stroke_model: TechniqueContextCNN | None = None,
+    pick_stroke_classes: list[str] | None = None,
+    pick_stroke_thresholds: list[float] | None = None,
     batch_size: int = 64,
 ) -> None:
     records: list[tuple[torch.Tensor, dict, str]] = []
@@ -103,6 +113,14 @@ def classify_rhythm(
         batch = records[start : start + batch_size]
         tensors = torch.stack([item[0] for item in batch]).to(device)
         outputs = model(tensors)
+        technique_probabilities = (
+            torch.sigmoid(technique_model(tensors)).cpu()
+            if technique_model is not None else None
+        )
+        pick_stroke_probabilities = (
+            torch.sigmoid(pick_stroke_model(tensors)).cpu()
+            if pick_stroke_model is not None else None
+        )
         for batch_index, (_, event, _) in enumerate(batch):
             voices = []
             for voice_index in range(2):
@@ -114,6 +132,83 @@ def classify_rhythm(
                 visible = decoded["state"]["value"] != "empty"
                 voices.append({"voice": voice_index, "visible": visible, **decoded})
             event["voices"] = voices
+            if technique_probabilities is not None and technique_classes is not None:
+                thresholds = technique_thresholds or [0.5] * len(technique_classes)
+                probabilities = technique_probabilities[batch_index].tolist()
+                event["technique_prediction"] = {
+                    "probabilities": dict(zip(technique_classes, probabilities)),
+                    "positive": {
+                        name: probability >= thresholds[index]
+                        for index, (name, probability) in enumerate(zip(technique_classes, probabilities))
+                    },
+                    "thresholds": dict(zip(technique_classes, thresholds)),
+                }
+            if pick_stroke_probabilities is not None and pick_stroke_classes is not None:
+                prediction = event.setdefault(
+                    "technique_prediction",
+                    {"probabilities": {}, "positive": {}, "thresholds": {}},
+                )
+                thresholds = pick_stroke_thresholds or [0.5] * len(pick_stroke_classes)
+                probabilities = pick_stroke_probabilities[batch_index].tolist()
+                for index, (name, probability) in enumerate(zip(pick_stroke_classes, probabilities)):
+                    if not name.startswith("pick_"):
+                        continue
+                    prediction["probabilities"][name] = probability
+                    prediction["positive"][name] = probability >= thresholds[index]
+                    prediction["thresholds"][name] = thresholds[index]
+    resolve_pick_stroke_sequences(systems)
+
+
+def resolve_pick_stroke_sequences(systems: list[dict], probability_floor: float = 0.045) -> None:
+    """Remove rest leakage and fill one-note holes in strict alternate picking."""
+    for system in systems:
+        for measure in system["measures"]:
+            resolved: list[str] = []
+            for event in measure["events"]:
+                primary = next((voice for voice in event.get("voices", []) if voice.get("voice") == 0), {})
+                state = primary.get("state")
+                if isinstance(state, dict):
+                    state = state.get("value")
+                prediction = event.get("technique_prediction") or {}
+                positive = prediction.get("positive") or {}
+                probabilities = prediction.get("probabilities") or {}
+                prediction["positive"] = positive
+                up = bool(positive.get("pick_up", False))
+                down = bool(positive.get("pick_down", False))
+                reason = None
+                if state != "note":
+                    up = down = False
+                    reason = "suppressed_on_non_note"
+                elif up and down:
+                    up = float(probabilities.get("pick_up", 0.0)) >= float(
+                        probabilities.get("pick_down", 0.0)
+                    )
+                    down = not up
+                    reason = "resolved_direction_conflict"
+
+                direction = "up" if up else "down" if down else "none"
+                if (
+                    direction == "none"
+                    and state == "note"
+                    and len(resolved) >= 2
+                    and resolved[-1] in {"up", "down"}
+                    and resolved[-2] in {"up", "down"}
+                    and resolved[-1] != resolved[-2]
+                ):
+                    candidate = "down" if resolved[-1] == "up" else "up"
+                    probability = float(probabilities.get(f"pick_{candidate}", 0.0))
+                    if probability >= probability_floor:
+                        direction = candidate
+                        reason = "alternate_sequence_single_hole"
+
+                positive["pick_up"] = direction == "up"
+                positive["pick_down"] = direction == "down"
+                prediction["pick_sequence_resolution"] = {
+                    "direction": direction,
+                    "reason": reason,
+                    "probability_floor": probability_floor,
+                }
+                resolved.append(direction)
 
 
 def draw_overlay(page: Image.Image, systems: list[dict], output: Path) -> None:
@@ -205,6 +300,7 @@ def main() -> None:
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--threshold", type=float)
+    parser.add_argument("--tab-threshold", type=float)
     parser.add_argument(
         "--measure-number-offset", type=int,
         help="One-based number of the first measure on this page; omit when unknown.",
@@ -255,7 +351,13 @@ def main() -> None:
         tab_model = TabSymbolDetector(len(tab_classes)).to(device)
         tab_model.load_state_dict(tab_checkpoint["model_state"])
         tab_model.eval()
-        detect_tab_fingering(page, systems, tab_model, tab_classes, device, threshold=0.3)
+        tab_threshold = (
+            args.tab_threshold
+            if args.tab_threshold is not None
+            else float(tab_checkpoint.get("detection_threshold", 0.3))
+        )
+        detect_tab_fingering(page, systems, tab_model, tab_classes, device, threshold=tab_threshold)
+        recover_isolated_tab_events(systems)
     if not args.skip_rhythm:
         rhythm_checkpoint = torch.load(args.rhythm_model, map_location=device, weights_only=False)
         rhythm = RhythmContextCNN().to(device)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import math
 from collections import Counter, defaultdict
@@ -27,6 +28,12 @@ SPLIT_OVERRIDES = {
     "2f48f92446035eba": "train",
     "520429005af0d7e6": "validation",
 }
+
+TECHNIQUE_CLASSES = [
+    "dead", "vibrato", "bend", "hammer", "slide", "ghost", "accent",
+    "harmonic", "grace", "palm_mute", "staccato", "let_ring", "tapping",
+    "pick_up", "pick_down",
+]
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -92,6 +99,7 @@ def voice_target(voice: dict | None) -> dict:
             "beam_count": 0,
             "note_count": 0,
             "tied_note_count": 0,
+            "effects": {name: False for name in TECHNIQUE_CLASSES},
         }
     if voice["double_dotted"]:
         dot = "double"
@@ -100,6 +108,10 @@ def voice_target(voice: dict | None) -> dict:
     else:
         dot = "none"
     notes = voice["notes"]
+    effects = {
+        name: any(bool(note.get("effects", {}).get(name, False)) for note in notes)
+        for name in TECHNIQUE_CLASSES
+    }
     return {
         "state": "rest" if voice["rest"] else "note",
         "duration_value": int(voice["duration_value"]),
@@ -109,6 +121,7 @@ def voice_target(voice: dict | None) -> dict:
         "beam_count": int(voice["beam_count"]),
         "note_count": len(notes),
         "tied_note_count": sum(bool(note["tied"]) for note in notes),
+        "effects": effects,
     }
 
 
@@ -202,13 +215,16 @@ def convert_source(
                 event_x = float(event["x"]) * sx
                 voices_by_index = {int(voice["voice_index"]): voice for voice in event["voices"]}
                 targets = [voice_target(voices_by_index.get(index)) for index in range(2)]
+                pick_stroke = int(event.get("pick_stroke", 0))
+                targets[0]["effects"]["pick_up"] = pick_stroke == 1
+                targets[0]["effects"]["pick_down"] = pick_stroke == -1
                 sample_id = (
                     f"{source_id}_p{page_index:03d}_m{int(measure['measure_number']):03d}"
                     f"_b{int(event['beat_index']):03d}"
                 )
                 crop, transform = build_event_crop(image, event_x, score_line_y)
                 crop_path = image_output / f"{sample_id}.png"
-                crop.save(crop_path, format="PNG", optimize=True)
+                crop.save(crop_path, format="PNG", compress_level=1)
 
                 label = {
                     "schema_version": "1.0",
@@ -224,6 +240,7 @@ def convert_source(
                     "beat_start": int(event["beat_start"]),
                     "precise_start": int(event["precise_start"]),
                     "event_x_page": event_x,
+                    "pick_stroke": pick_stroke,
                     "voices": targets,
                     "transform": transform,
                 }
@@ -264,6 +281,7 @@ def convert_source(
                     "precise_start": event["precise_start"],
                     "beat_index": event["beat_index"],
                     "x": event_x,
+                    "pick_stroke": pick_stroke,
                     "voices": page_voices,
                 })
                 records.append({
@@ -301,7 +319,7 @@ def convert_source(
         }
         page_label_path = label_root / f"page_{page_index:03d}.json"
         page_label_path.write_text(json.dumps(page_label, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        overlay.save(overlay_root / f"page_{page_index:03d}.png", format="PNG", optimize=True)
+        overlay.save(overlay_root / f"page_{page_index:03d}.png", format="PNG", compress_level=1)
 
     return records, counts
 
@@ -312,6 +330,7 @@ def main() -> None:
     )
     parser.add_argument("--database", type=Path, default=DATABASE_ROOT)
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
 
     database = args.database.resolve()
@@ -333,16 +352,27 @@ def main() -> None:
     records: list[dict] = []
     total_counts: Counter[str] = Counter()
     split_counts: dict[str, Counter[str]] = defaultdict(Counter)
-    for layout_path in layout_paths:
+    def build_one(layout_path: Path) -> tuple[str, list[dict], Counter[str]]:
         source_id = layout_path.stem
         if source_id not in split_by_source:
             raise KeyError(f"No split for source {source_id}")
         split = split_by_source[source_id]
         source_events, counts = convert_source(database, layout_path, split, dataset_root)
-        records.extend(source_events)
-        total_counts.update(counts)
-        split_counts[split].update(counts)
-        split_counts[split]["sources"] += 1
+        return split, source_events, counts
+
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
+        futures = {pool.submit(build_one, path): path for path in layout_paths}
+        completed = 0
+        for future in as_completed(futures):
+            split, source_events, counts = future.result()
+            records.extend(source_events)
+            total_counts.update(counts)
+            split_counts[split].update(counts)
+            split_counts[split]["sources"] += 1
+            completed += 1
+            if completed % 20 == 0 or completed == len(layout_paths):
+                print(f"BUILT_RHYTHM_SOURCES={completed}/{len(layout_paths)}", flush=True)
+    records.sort(key=lambda record: record["sample_id"])
 
     manifest_root = database / "rhythm_events" / "manifests"
     manifest_root.mkdir(parents=True, exist_ok=True)

@@ -226,6 +226,9 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=20260713)
     parser.add_argument("--init-checkpoint", type=Path, help="Optional compatible checkpoint for fine-tuning.")
+    parser.add_argument("--task-root", default="rhythm_events",
+                        choices=("rhythm_events", "tab_rhythm_events"),
+                        help="Train score+TAB score-staff crops or pure-TAB rhythm-stem crops.")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -236,7 +239,7 @@ def main() -> None:
         torch.backends.cudnn.benchmark = True
 
     database = args.database.resolve()
-    manifest_root = database / "rhythm_events" / "manifests"
+    manifest_root = database / args.task_root / "manifests"
     train_dataset = RhythmEventDataset(database, manifest_root / "train.jsonl", augment=True)
     validation_dataset = RhythmEventDataset(database, manifest_root / "validation.jsonl")
     test_dataset = RhythmEventDataset(database, manifest_root / "test.jsonl")
@@ -251,7 +254,13 @@ def main() -> None:
             weight += 3.0
         if any(voice["dot"] != "none" for voice in targets):
             weight += 2.0
+        if any(voice["dot"] == "double" for voice in targets):
+            weight += 8.0
         if any(voice["division"] != "1:1" for voice in targets):
+            weight += 2.0
+        if any(voice["division"] not in {"1:1", "3:2", "6:4"} for voice in targets):
+            weight += 6.0
+        if any(voice["duration_value"] in {1, 2, 32, 64} for voice in targets if voice["state"] != "empty"):
             weight += 2.0
         sample_weights.append(weight)
     sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_dataset), replacement=True)
@@ -272,11 +281,13 @@ def main() -> None:
         initial = torch.load(args.init_checkpoint, map_location=device, weights_only=False)
         model.load_state_dict(initial["model_state"])
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
+    use_amp = device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
     loss_weights = build_loss_weights(train_dataset, device)
 
-    model_root = database / "rhythm_events" / "models"
-    report_root = database / "rhythm_events" / "reports"
+    model_root = database / args.task_root / "models"
+    report_root = database / args.task_root / "reports"
     model_root.mkdir(parents=True, exist_ok=True)
     report_root.mkdir(parents=True, exist_ok=True)
     checkpoint_path = model_root / "rhythm_context_cnn.pt"
@@ -304,11 +315,14 @@ def main() -> None:
             images = images.to(device, non_blocking=True)
             targets = targets.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
-            outputs = model(images)
-            loss = calculate_loss(outputs, targets, loss_weights)
-            loss.backward()
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                outputs = model(images)
+                loss = calculate_loss(outputs, targets, loss_weights)
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             running_loss += float(loss) * images.shape[0]
             sample_count += images.shape[0]
         scheduler.step()
@@ -338,7 +352,7 @@ def main() -> None:
                 "parameter_count": parameter_count(model),
                 "best_epoch": best_epoch,
                 "best_validation_visible_voice_0_exact": best_score,
-                "scope": "Event crops use ground-truth score_tab event centers.",
+                "scope": f"Event crops use ground-truth {args.task_root} event centers.",
             }, checkpoint_path)
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)

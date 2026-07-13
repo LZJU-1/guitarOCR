@@ -57,9 +57,19 @@ It deliberately keeps unknown values as `null` instead of inventing defaults.
                   "voice": 0,
                   "source": "printed_tab",
                   "tie_in": false,
-                  "tie_out": true
+                  "tie_out": true,
+                  "dead": false,
+                  "effects": {
+                    "palm_mute": true,
+                    "slide": false,
+                    "vibrato": false
+                  }
                 }
               ],
+              "technique_prediction": {
+                "positive": {"palm_mute": true},
+                "probabilities": {"palm_mute": 0.997}
+              },
               "tie_relation": {
                 "visual_probability": 0.99,
                 "score_note_count": 2,
@@ -105,8 +115,11 @@ It deliberately keeps unknown values as `null` instead of inventing defaults.
   printed value is carried through following measures and pages;
   `time_signature_source` records `printed`, `carried`, or `unknown`.
 - Duration arithmetic uses exact rational whole-note fractions. A non-exact
-  voice receives an advisory `correction_proposal` only when available. The
-  original CNN result is never overwritten.
+  voice receives an auditable `correction_proposal` when available. The
+  measure solver may select a candidate only when the configured probability
+  gate passes; a unique-measure closure is limited to one non-destructive
+  candidate that exactly fills an otherwise invalid measure. Selection reason
+  and original CNN candidates remain in `rhythm_audit`.
 - Each active predicted voice receives rational `onset`, `duration_fraction`,
   and `end` values. They are derived from that voice's original CNN sequence;
   an earlier error can therefore shift later onsets and will be visible in the
@@ -115,11 +128,19 @@ It deliberately keeps unknown values as `null` instead of inventing defaults.
   accepted as a candidate only when the predicted score-note count exceeds the
   attacked notes printed in TAB. This rejects visually similar slurs and
   hammer/pull curves.
-- Only adjacent full-event continuations with no newly attacked TAB notes are
-  automatically resolved. Copied continuation notes use
+- Adjacent full-event continuations and constrained partial continuations can
+  be resolved by matching missing score-note positions to preceding TAB notes.
+  Copied continuation notes use
   `source: tie_continuation`, set `tie_in`, update the source note's `tie_out`,
-  and create a top-level `tie_edges` record. Partial chords, non-adjacent and
-  cross-system candidates remain explicit but unresolved.
+  and create a top-level `tie_edges` record. Ambiguous, non-adjacent and
+  unsupported cross-system candidates remain explicit rather than guessed.
+- `technique_prediction` stores the event-context CNN probabilities and
+  thresholded labels. Each resolved note receives an `effects` mapping; `X`
+  also sets `dead`. The exporter uses this mapping and reports any GP5-format
+  downgrade. Beat-level `pick_up`/`pick_down` come from a dedicated override
+  checkpoint; `pick_sequence_resolution` records rest suppression, direction
+  conflict resolution, or a probability-supported single-hole fill in strict
+  alternate picking.
 - `guitarocr.pipeline.infer_tuxguitar_score_tab_document` accepts a PDF or ordered page images,
   assigns document-level measure numbers, carries time signatures, and writes
   one `document_score_ir.json` plus per-page IR and overlays. PDF pages retain
@@ -128,9 +149,11 @@ It deliberately keeps unknown values as `null` instead of inventing defaults.
 
 ## Current boundary
 
-The IR contains event order, detected rhythm, visibly printed string/fret
-values, time signatures, document-level measure numbers, measure-duration
-audits, and conservative tie edges. It does not yet contain complete partial or
-cross-system tie relations, tuning, capo, tempo, techniques, or robust
-second-voice semantics. Therefore it is not yet valid input for lossless GP
-serialization.
+The IR contains event order, rhythm, visibly printed or tie-recovered
+string/fret values, X/dead semantics, time signatures, recognized tempo,
+document-level measure numbers, measure-duration audits, tie edges, and
+event/note technique labels. It is the supported input to the current primary-
+voice GP5 writer. It is not a lossless container for title/key-signature/page
+layout metadata, complete multi-track/multi-voice structure, or every ambiguous
+cross-system relation; unknown tuning/capo values remain explicit until export
+defaults are chosen and reported.

@@ -6,8 +6,8 @@ from torch import nn
 
 STATE_CLASSES = ["empty", "note", "rest"]
 DURATION_CLASSES = [1, 2, 4, 8, 16, 32, 64]
-DOT_CLASSES = ["none", "single"]
-DIVISION_CLASSES = ["1:1", "3:2", "6:4"]
+DOT_CLASSES = ["none", "single", "double"]
+DIVISION_CLASSES = ["1:1", "3:2", "6:4", "4:2", "5:4", "10:8", "12:8", "7:4", "9:8"]
 INPUT_WIDTH = 256
 INPUT_HEIGHT = 192
 

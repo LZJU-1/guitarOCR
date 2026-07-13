@@ -117,7 +117,12 @@ def main() -> None:
                 require(len(measure["score_staff"]["line_y"]) == 5,
                         f"{source_id} m{measure_index}: expected five score lines")
 
-                expected_beats = expected_measure["beats"]
+                # Some legacy readers retain insertion order instead of musical
+                # start order. The print layout normalises beats chronologically.
+                expected_beats = sorted(
+                    expected_measure["beats"],
+                    key=lambda beat: (int(beat["precise_start"]), int(beat["start"])),
+                )
                 require(len(measure["events"]) == len(expected_beats),
                         f"{source_id} m{measure_index}: event count mismatch")
                 for beat_index, (event, expected_beat) in enumerate(zip(measure["events"], expected_beats)):

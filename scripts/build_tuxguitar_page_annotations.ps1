@@ -1,5 +1,7 @@
 param(
-    [int]$Limit = 0
+    [int]$Limit = 0,
+    [ValidateSet('tab_only', 'score_tab')]
+    [string]$Layout = 'tab_only'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,7 +22,7 @@ foreach ($required in @(
     $PythonSource,
     $Python,
     (Join-Path $DatabaseRoot 'source\gp'),
-    (Join-Path $DatabaseRoot 'output\images\tab_only')
+    (Join-Path $DatabaseRoot "output\images\$Layout")
 )) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Required path is missing: $required"
@@ -42,7 +44,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "javac failed with exit code $LASTEXITCODE"
 }
 
-Write-Host '[2/3] Replaying TuxGuitar tab_only layout and recording logical coordinates...'
+Write-Host "[2/3] Replaying TuxGuitar $Layout layout and recording logical coordinates..."
 $Java = Join-Path $TuxGuitarRoot 'jre\bin\java.exe'
 $JavaArgs = @(
     '-Xmx3g',
@@ -52,7 +54,8 @@ $JavaArgs = @(
     $ClassPath,
     'TuxGuitarTabAnnotationBuilder',
     $DatabaseRoot,
-    $Limit.ToString()
+    $Limit.ToString(),
+    $Layout
 )
 & $Java @JavaArgs
 if ($LASTEXITCODE -ne 0) {
@@ -60,9 +63,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host '[3/3] Converting to PNG pixels and drawing annotation overlays...'
-& $Python -m guitarocr.data.build_tuxguitar_page_annotations --database $DatabaseRoot --limit $Limit
+& $Python -m guitarocr.data.build_tuxguitar_page_annotations --database $DatabaseRoot --limit $Limit --layout $Layout
 if ($LASTEXITCODE -ne 0) {
     throw "PNG annotation conversion failed with exit code $LASTEXITCODE"
 }
 
-Write-Host 'Complete. Inspect overlays under database\output\annotation_overlays\tab_only.'
+Write-Host "Complete. Inspect overlays under database\output\annotation_overlays\$Layout."

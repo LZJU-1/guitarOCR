@@ -235,3 +235,70 @@ def audit_score_ir(score_ir: dict) -> dict:
                 counts["primary_with_plausible_proposal"] += int(proposal["plausible"])
     score_ir["rhythm_audit_summary"] = counts
     return counts
+
+
+def apply_plausible_rhythm_corrections(score_ir: dict) -> dict:
+    """Apply only measure-filling alternatives supported by CNN probabilities.
+
+    The optimiser never invents a pitch. It changes a duration/dot/tuplet class,
+    or removes a low-confidence score-only event, only when the full measure is
+    exactly filled and the joint candidate probability is at least 20% of the
+    unconstrained prediction. A single non-destructive change may also close an
+    otherwise invalid measure when its CNN probability is at least 0.5%; this
+    narrow override is recorded as ``unique_measure_closure``.
+    """
+    summary = {"measures_changed": 0, "events_changed": 0, "events_removed": 0}
+    for track in score_ir.get("tracks", []):
+        for measure in track.get("measures", []):
+            primary = (
+                measure.get("rhythm_audit", {}).get("voices", {}).get("voice_0", {})
+            )
+            proposal = primary.get("correction_proposal")
+            if not proposal:
+                continue
+            modifications = proposal.get("modifications", [])
+            closure_override = (
+                primary.get("status") in {"underfilled", "overfilled"}
+                and proposal.get("fills_measure")
+                and len(modifications) == 1
+                and modifications[0].get("to") is not None
+                and float(modifications[0].get("candidate_probability", 0.0)) >= 0.005
+            )
+            if not proposal.get("plausible") and not closure_override:
+                continue
+            changed = False
+            for modification in modifications:
+                event_index = int(modification["event_index"])
+                if not 0 <= event_index < len(measure.get("events", [])):
+                    continue
+                event = measure["events"][event_index]
+                voice = next(
+                    (item for item in event.get("voices", []) if int(item.get("voice", -1)) == 0),
+                    None,
+                )
+                if voice is None:
+                    continue
+                target = modification.get("to")
+                if target is None:
+                    voice.update({
+                        "state": "empty", "duration_value": None,
+                        "dot": None, "division": None,
+                    })
+                    summary["events_removed"] += 1
+                else:
+                    voice.update({
+                        "duration_value": int(target["duration_value"]),
+                        "dot": target["dot"],
+                        "division": target["division"],
+                    })
+                event["rhythm_constraint_correction"] = {
+                    **modification,
+                    "relative_probability_vs_current": proposal["relative_probability_vs_current"],
+                    "selection": "plausible" if proposal.get("plausible") else "unique_measure_closure",
+                }
+                summary["events_changed"] += 1
+                changed = True
+            summary["measures_changed"] += int(changed)
+    audit_score_ir(score_ir)
+    score_ir["rhythm_constraint_corrections"] = summary
+    return summary

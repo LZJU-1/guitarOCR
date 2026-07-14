@@ -20,7 +20,11 @@ from guitarocr.pipeline.infer_tuxguitar_score_tab_page import (
     locate_page_events,
     parse_time_signature,
 )
-from guitarocr.pipeline.measure_rhythm_constraints import audit_score_ir, apply_plausible_rhythm_corrections
+from guitarocr.pipeline.measure_rhythm_constraints import (
+    apply_plausible_rhythm_corrections,
+    audit_score_ir,
+    refine_time_signatures_from_rhythm,
+)
 from guitarocr.pipeline.pdf_page_renderer import MODEL_RENDER_DPI, render_pdf_pages
 from guitarocr.pipeline.score_tab_fingering import (
     build_score_ir, correct_multidigit_fret_outliers, detect_tab_fingering,
@@ -258,6 +262,7 @@ def main() -> None:
         )
         classify_ties(page, systems, models["tie"], device, models["tie_threshold"])
         page_ir = build_score_ir(systems, measure_number_offset=next_measure_number)
+        refine_time_signatures_from_rhythm(page_ir)
         audit_score_ir(page_ir)
         measures = page_ir["tracks"][0]["measures"]
         next_measure_number += len(measures)
@@ -296,6 +301,7 @@ def main() -> None:
     document_ir = {
         "schema_version": "1.0",
         "document": {
+            "layout": "score_tab",
             "page_count": len(page_sources),
             "pdf_render_dpi": MODEL_RENDER_DPI,
             "pages": page_records,
@@ -316,6 +322,7 @@ def main() -> None:
             "multi-voice note assignment remain unresolved."
         ),
     }
+    time_signature_refinement = refine_time_signatures_from_rhythm(document_ir)
     audit_score_ir(document_ir)
     rhythm_corrections = apply_plausible_rhythm_corrections(document_ir)
     audit = document_ir["rhythm_audit_summary"]
@@ -332,6 +339,7 @@ def main() -> None:
         ),
         "rhythm_audit": audit,
         "rhythm_corrections": rhythm_corrections,
+        "time_signature_refinement": time_signature_refinement,
         "ties": tie_summary,
         "fret_corrections": fret_corrections,
         "tempo_prediction": tempo_prediction,

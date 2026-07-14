@@ -155,14 +155,32 @@ def build_score_ir(systems: list[dict], measure_number_offset: int | None = None
                 tie_relation = None
                 if tie_visual is not None:
                     missing_note_count = max(0, int(tie_visual["score_note_count"]) - len(notes))
-                    consistent = bool(tie_visual["visual_positive"] and missing_note_count > 0)
+                    pure_tab = system.get("layout") == "tab_only"
+                    candidate_count = (
+                        int(tie_visual["tie_note_count"])
+                        if pure_tab else missing_note_count
+                    )
+                    consistent = bool(
+                        tie_visual["visual_positive"]
+                        and candidate_count > 0
+                        and (
+                            not pure_tab
+                            or len(tie_visual.get("target_y_page", [])) == candidate_count
+                        )
+                    )
                     tie_relation = {
                         **tie_visual,
+                        "target_reference": (
+                            "tab_string"
+                            if system.get("layout") == "tab_only" else "score_notehead"
+                        ),
                         "attacked_tab_note_count": len(notes),
                         "missing_score_note_count": missing_note_count,
                         "candidate": consistent,
-                        "candidate_tie_count": missing_note_count if consistent else 0,
+                        "candidate_tie_count": candidate_count if consistent else 0,
                         "status": (
+                            "tab_visual_target_candidate"
+                            if consistent and pure_tab else
                             "score_tab_consistent_candidate"
                             if consistent else
                             "visual_rejected_no_missing_score_note"
@@ -192,9 +210,18 @@ def build_score_ir(systems: list[dict], measure_number_offset: int | None = None
                     ),
                     "page_measure_index": int(measure["measure_number"]),
                     "system_index": int(system["system_index"]),
+                    "bbox": [float(value) for value in measure["bbox"]],
+                    "tab_string_y": [float(value) for value in system["tab_string_y"]],
+                    "tab_spacing": float(system["tab_spacing"]),
                     "time_signature": measure.get("time_signature"),
                     "time_signature_source": measure.get("time_signature_source", "unknown"),
                     "printed_time_signature": measure.get("printed_time_signature"),
+                    "printed_time_signature_candidate": measure.get(
+                        "printed_time_signature_candidate"
+                    ),
+                    "printed_time_signature_shape_hint": measure.get(
+                        "printed_time_signature_shape_hint"
+                    ),
                     "events": events,
                     "orphan_tab_events": orphan_tab,
                 }
@@ -221,7 +248,7 @@ def build_score_ir(systems: list[dict], measure_number_offset: int | None = None
 
 
 def resolve_unambiguous_ties(score_ir: dict) -> dict:
-    """Resolve only adjacent full-event continuations; retain every other candidate."""
+    """Resolve conservative continuations, using TAB-string y when available."""
     edges: list[dict] = []
     summary = {
         "visual_candidates": 0,
@@ -232,6 +259,15 @@ def resolve_unambiguous_ties(score_ir: dict) -> dict:
     }
     for track in score_ir["tracks"]:
         previous: tuple[dict, dict] | None = None
+        last_note_by_string: dict[int, tuple[dict, dict, int, dict]] = {}
+
+        def remember_notes(measure: dict, event: dict) -> None:
+            for note_index, note in enumerate(event["notes"]):
+                if not note.get("dead"):
+                    last_note_by_string[int(note["string"])] = (
+                        measure, event, note_index, note
+                    )
+
         for measure in track["measures"]:
             for event in measure["events"]:
                 relation = event.get("tie_relation")
@@ -239,33 +275,62 @@ def resolve_unambiguous_ties(score_ir: dict) -> dict:
                     summary["visual_candidates"] += int(relation["visual_positive"])
                     summary["score_tab_consistent_candidates"] += int(relation["candidate"])
                 if relation is None or not relation["candidate"]:
+                    remember_notes(measure, event)
                     previous = (measure, event)
                     continue
                 missing = int(relation["candidate_tie_count"])
                 attacked_strings = {int(note["string"]) for note in event["notes"]}
-                continuation_candidates: list[tuple[int, dict]] = []
-                if previous is not None:
+                continuation_candidates: list[tuple[dict, dict, int, dict]] = []
+                resolution_method = "adjacent_score_tab_consistency"
+                if (
+                    relation.get("target_reference") == "tab_string"
+                    and relation.get("target_y_page")
+                    and measure.get("tab_string_y")
+                ):
+                    string_y = [float(value) for value in measure["tab_string_y"]]
+                    spacing = (
+                        (string_y[-1] - string_y[0]) / max(1, len(string_y) - 1)
+                    )
+                    target_strings = {
+                        min(
+                            range(len(string_y)),
+                            key=lambda index: abs(string_y[index] - float(target_y)),
+                        ) + 1
+                        for target_y in relation["target_y_page"]
+                        if min(abs(value - float(target_y)) for value in string_y)
+                        <= 0.6 * spacing
+                    }
                     continuation_candidates = [
-                        (note_index, note)
+                        last_note_by_string[string]
+                        for string in sorted(target_strings)
+                        if string not in attacked_strings and string in last_note_by_string
+                    ]
+                    resolution_method = "tab_string_y_sequence_consistency"
+                if previous is not None:
+                    adjacent_candidates = [
+                        (previous[0], previous[1], note_index, note)
                         for note_index, note in enumerate(previous[1]["notes"])
                         if int(note["string"]) not in attacked_strings
                     ]
+                    if len(continuation_candidates) != missing:
+                        continuation_candidates = adjacent_candidates
+                        resolution_method = "adjacent_score_tab_consistency"
                 can_resolve = missing > 0 and len(continuation_candidates) == missing
                 if not can_resolve:
                     relation["status"] = "unresolved_partial_or_nonadjacent"
                     summary["unresolved_candidates"] += 1
+                    remember_notes(measure, event)
                     previous = (measure, event)
                     continue
-                previous_measure, previous_event = previous
                 continued_notes = []
-                for note_index, source_note in continuation_candidates:
+                for source_measure, source_event, note_index, source_note in continuation_candidates:
                     source_note["tie_out"] = True
                     continued = copy.deepcopy(source_note)
                     continued["source"] = "tie_continuation"
                     continued["tie_in"] = True
                     continued["tie_out"] = False
                     current_effects = (
-                        event.get("technique_prediction", {}).get("positive", {})
+                        (event.get("technique_prediction") or {}).get("positive", {})
                     )
                     continued["effects"] = {
                         **current_effects,
@@ -277,9 +342,9 @@ def resolve_unambiguous_ties(score_ir: dict) -> dict:
                     edges.append(
                         {
                             "from": {
-                                "measure": previous_measure["number"],
-                                "page_measure_index": previous_measure["page_measure_index"],
-                                "event_order": previous_event["order"],
+                                "measure": source_measure["number"],
+                                "page_measure_index": source_measure["page_measure_index"],
+                                "event_order": source_event["order"],
                                 "note_index": note_index,
                             },
                             "to": {
@@ -290,14 +355,15 @@ def resolve_unambiguous_ties(score_ir: dict) -> dict:
                             },
                             "string": source_note["string"],
                             "fret": source_note["fret"],
-                            "method": "adjacent_partial_event_score_tab_consistency",
+                            "method": resolution_method,
                         }
                     )
                 event["notes"].extend(continued_notes)
                 event["notes"].sort(key=lambda note: int(note["string"]))
-                relation["status"] = "auto_resolved_adjacent_partial_or_full_event"
+                relation["status"] = f"auto_resolved_{resolution_method}"
                 summary["auto_resolved_events"] += 1
                 summary["auto_resolved_notes"] += len(continued_notes)
+                remember_notes(measure, event)
                 previous = (measure, event)
     score_ir["tie_edges"] = edges
     score_ir["tie_summary"] = summary

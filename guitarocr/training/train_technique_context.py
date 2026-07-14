@@ -102,17 +102,26 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=2e-3)
     parser.add_argument("--init-checkpoint", type=Path)
-    parser.add_argument("--output-name", default="technique_context_cnn.pt")
+    parser.add_argument(
+        "--output-name",
+        help="Checkpoint filename; defaults to the layout-specific public weight name.",
+    )
     parser.add_argument("--boost-source", action="append", default=[])
     parser.add_argument("--boost-weight", type=float, default=12.0)
     parser.add_argument("--selection-source")
+    parser.add_argument(
+        "--task-root",
+        default="rhythm_events",
+        choices=("rhythm_events", "tab_rhythm_events"),
+        help="Use score+TAB score-staff crops or pure-TAB event crops.",
+    )
     parser.add_argument(
         "--freeze-existing-classes", action="store_true",
         help="Freeze the initialized backbone and restore existing classifier rows after every step.",
     )
     args = parser.parse_args()
     random.seed(20260714); np.random.seed(20260714); torch.manual_seed(20260714)
-    database = args.database.resolve(); manifests = database / "rhythm_events" / "manifests"
+    database = args.database.resolve(); manifests = database / args.task_root / "manifests"
     train = TechniqueDataset(database, manifests / "train.jsonl", True)
     validation = TechniqueDataset(database, manifests / "validation.jsonl")
     test = TechniqueDataset(database, manifests / "test.jsonl")
@@ -189,8 +198,13 @@ def main() -> None:
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
-    model_root = database / "technique_events" / "models"; model_root.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = model_root / args.output_name
+    model_task_root = "technique_events" if args.task_root == "rhythm_events" else "tab_technique_events"
+    model_root = database / model_task_root / "models"; model_root.mkdir(parents=True, exist_ok=True)
+    output_name = args.output_name or (
+        "technique_context_cnn.pt"
+        if args.task_root == "rhythm_events" else "tab_technique_context_cnn.pt"
+    )
+    checkpoint_path = model_root / output_name
     best_score = -1.0; started = time.perf_counter(); history = []
     print(json.dumps({"device": str(device), "parameters": parameter_count(model), "train": len(train),
                       "positive_counts": dict(zip(TECHNIQUE_CLASSES, positive_counts.astype(int).tolist()))}))
@@ -238,7 +252,7 @@ def main() -> None:
               "test": evaluate(model, test_loader, device, thresholds)}
     if selection_loader is not None:
         report["selection"] = evaluate(model, selection_loader, device, thresholds)
-    metrics_name = f"{Path(args.output_name).stem}_metrics.json"
+    metrics_name = f"{Path(output_name).stem}_metrics.json"
     (model_root / metrics_name).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report))
 

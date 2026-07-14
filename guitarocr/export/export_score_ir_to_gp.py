@@ -98,6 +98,46 @@ def issue(report: dict, code: str, message: str, **location: object) -> None:
         report["issues"].append({"code": code, "message": message, **location})
 
 
+def active_voice_indices(score_ir: dict) -> list[int]:
+    tracks = score_ir.get("tracks") or []
+    if not tracks:
+        return []
+    voices = {
+        int(voice["voice"])
+        for measure in tracks[0].get("measures", [])
+        for event in measure.get("events", [])
+        for voice in event.get("voices", [])
+        if voice.get("state") in {"note", "rest"}
+        and isinstance(voice.get("voice"), int)
+    }
+    return sorted(value for value in voices if value in (0, 1))
+
+
+def ambiguous_note_voice(event: dict) -> int:
+    """Choose one active voice for TAB notes whose stem association is ambiguous.
+
+    A common two-voice pattern has an explicit tied note in one voice and a newly
+    attacked printed fret in the other.  In that case the unassigned fret belongs
+    to the only active voice that does not already own an explicit note.
+    """
+    active = {
+        int(voice["voice"])
+        for voice in event.get("voices", [])
+        if voice.get("state") == "note" and isinstance(voice.get("voice"), int)
+    }
+    explicit = {
+        int(note["voice"])
+        for note in event.get("notes", [])
+        if isinstance(note.get("voice"), int)
+    }
+    missing = active - explicit
+    if len(missing) == 1:
+        return next(iter(missing))
+    if len(active) == 1:
+        return next(iter(active))
+    return min(active) if active else 0
+
+
 def resolve_title(score_ir: dict, ir_path: Path, supplied: str | None) -> str:
     if supplied:
         return supplied
@@ -287,9 +327,12 @@ def build_plan(
             pick_stroke_events += int(pick_stroke != 0)
             if state == "note":
                 notes_by_string: dict[int, dict] = {}
+                fallback_voice = ambiguous_note_voice(event)
                 for note in event.get("notes", []):
                     note_voice = note.get("voice")
                     if note_voice not in (None, voice_index):
+                        continue
+                    if note_voice is None and fallback_voice != voice_index:
                         continue
                     string = note.get("string")
                     fret = note.get("fret")
@@ -503,6 +546,105 @@ def build_plan(
     return report
 
 
+def build_all_voice_plan(
+    score_ir: dict,
+    ir_path: Path,
+    plan_path: Path,
+    *,
+    tempo: int | None,
+    tuning: list[int] | None,
+    title: str | None,
+) -> dict:
+    voices = active_voice_indices(score_ir)
+    if not voices:
+        raise ValueError("IR contains no active note/rest voices")
+
+    voice_reports: list[tuple[int, dict]] = []
+    voice_lines: list[tuple[int, list[str]]] = []
+    try:
+        for voice in voices:
+            temporary = plan_path.with_name(f"{plan_path.stem}.voice{voice}.tmp.tsv")
+            report = build_plan(
+                score_ir,
+                ir_path,
+                temporary,
+                voice_index=voice,
+                tempo=tempo,
+                tuning=tuning,
+                title=title,
+            )
+            voice_reports.append((voice, report))
+            voice_lines.append((voice, temporary.read_text(encoding="utf-8").splitlines()))
+
+        primary_lines = voice_lines[0][1]
+        output_lines = ["GUITAROCR_PLAN\t3"]
+        output_lines.extend(line for line in primary_lines if line.startswith("META\t"))
+        output_lines.extend(line for line in primary_lines if line.startswith("MEASURE\t"))
+        for voice, lines in voice_lines:
+            for line in lines:
+                if not line.startswith("EVENT\t"):
+                    continue
+                fields = line.split("\t")
+                # v3 adds voice index after measure/event-order.
+                if voice != voices[0]:
+                    # Pick direction is a TGBeat property, not a per-voice one.
+                    fields[10] = "0"
+                output_lines.append("\t".join([*fields[:3], str(voice), *fields[3:]]))
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text("\n".join(output_lines) + "\n", encoding="utf-8")
+    finally:
+        for voice in voices:
+            plan_path.with_name(f"{plan_path.stem}.voice{voice}.tmp.tsv").unlink(missing_ok=True)
+
+    primary = voice_reports[0][1]
+    aggregate_counts: Counter = Counter()
+    aggregate_issues: list[dict] = []
+    assumptions: list[str] = []
+    for voice, report in voice_reports:
+        aggregate_counts.update(report["issue_counts"])
+        aggregate_issues.extend({**item, "voice": voice} for item in report["issues"])
+        for assumption in report["assumptions"]:
+            if assumption not in assumptions:
+                assumptions.append(assumption)
+    per_voice = {str(voice): report["plan"] for voice, report in voice_reports}
+    plan = {
+        **primary["plan"],
+        "active_voices": voices,
+        "rhythm_exact_measure_count": min(
+            report["plan"]["rhythm_exact_measure_count"] for _, report in voice_reports
+        ),
+        "rhythm_exact_voice_measure_count": sum(
+            report["plan"]["rhythm_exact_measure_count"] for _, report in voice_reports
+        ),
+        "exported_event_count": sum(
+            report["plan"]["exported_event_count"] for _, report in voice_reports
+        ),
+        "exported_note_count": sum(
+            report["plan"]["exported_note_count"] for _, report in voice_reports
+        ),
+        "exported_rest_count": sum(
+            report["plan"]["exported_rest_count"] for _, report in voice_reports
+        ),
+        "generated_structural_rest_count": sum(
+            report["plan"]["generated_structural_rest_count"] for _, report in voice_reports
+        ),
+        "tied_note_count": sum(
+            report["plan"]["tied_note_count"] for _, report in voice_reports
+        ),
+        "pick_stroke_event_count": primary["plan"]["pick_stroke_event_count"],
+        "per_voice": per_voice,
+    }
+    return {
+        "schema_version": "1.0",
+        "input_ir": str(ir_path.resolve()),
+        "voice": "all",
+        "assumptions": assumptions,
+        "issue_counts": dict(sorted(aggregate_counts.items())),
+        "issues": aggregate_issues[:200],
+        "plan": plan,
+    }
+
+
 def compile_writer(root: Path) -> tuple[Path, str]:
     source = JAVA_SOURCE_ROOT / "TuxGuitarIrGp5Writer.java"
     classes = root / "database" / "tmp" / "gp_writer_classes"
@@ -572,7 +714,7 @@ def export_ir(
     output: Path,
     *,
     preview: Path | None,
-    voice: int,
+    voice: int | None,
     tempo: int | None,
     tuning: list[int] | None,
     title: str | None,
@@ -582,15 +724,25 @@ def export_ir(
     output = output.resolve()
     score_ir = json.loads(ir_path.read_text(encoding="utf-8"))
     plan = output.with_suffix(".plan.tsv")
-    report = build_plan(
-        score_ir,
-        ir_path,
-        plan,
-        voice_index=voice,
-        tempo=tempo,
-        tuning=tuning,
-        title=title,
-    )
+    if voice is None:
+        report = build_all_voice_plan(
+            score_ir,
+            ir_path,
+            plan,
+            tempo=tempo,
+            tuning=tuning,
+            title=title,
+        )
+    else:
+        report = build_plan(
+            score_ir,
+            ir_path,
+            plan,
+            voice_index=voice,
+            tempo=tempo,
+            tuning=tuning,
+            title=title,
+        )
     java_result = run_writer(root, plan, output, preview.resolve() if preview else None)
     report.update(
         {
@@ -613,6 +765,14 @@ def parse_tuning_arg(value: str) -> list[int]:
         raise argparse.ArgumentTypeError("Tuning must be comma-separated MIDI pitches") from error
 
 
+def parse_voice_arg(value: str) -> int | None:
+    if value.lower() == "all":
+        return None
+    if value in {"0", "1"}:
+        return int(value)
+    raise argparse.ArgumentTypeError("Voice must be all, 0, or 1")
+
+
 def main() -> None:
     root = PROJECT_ROOT
     parser = argparse.ArgumentParser(
@@ -622,7 +782,13 @@ def main() -> None:
     parser.add_argument("-o", "--output", type=Path)
     parser.add_argument("--preview-pdf", type=Path)
     parser.add_argument("--no-preview", action="store_true")
-    parser.add_argument("--voice", type=int, default=0, choices=(0, 1))
+    parser.add_argument(
+        "--voice",
+        type=parse_voice_arg,
+        default=None,
+        metavar="{all,0,1}",
+        help="Export both recognized voices by default; pass 0 or 1 to select one voice.",
+    )
     parser.add_argument("--tempo", type=int)
     parser.add_argument("--tuning", type=parse_tuning_arg)
     parser.add_argument("--title")

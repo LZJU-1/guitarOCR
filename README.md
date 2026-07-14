@@ -1,6 +1,6 @@
 # GuitarOCR
 
-GuitarOCR 把规则排版的吉他“五线谱 + 六线 TAB”PDF 恢复为可编辑的 GP5。项目当前聚焦 TuxGuitar 2.0.1 的印刷样式，不是手写谱或任意制谱软件的通用 OMR。
+GuitarOCR 把规则排版的吉他“纯六线 TAB”或“五线谱 + 六线 TAB”PDF 恢复为可编辑的 GP5。项目当前聚焦 TuxGuitar 2.0.1 的印刷样式，不是手写谱或任意制谱软件的通用 OMR。
 
 ```text
 PDF / 整页图片
@@ -12,23 +12,23 @@ PDF / 整页图片
   → TuxGuitar 回读校验 + 预览 PDF
 ```
 
-仓库包含源码、数据构建/训练/评估脚本和七个轻量推理模型；不提交原始曲谱、批量渲染图、训练数据库或第三方运行时。
+仓库包含源码、数据构建/训练/评估脚本和十一个轻量推理模型；不提交原始曲谱、批量渲染图、训练数据库或第三方运行时。
 
 ## 当前能做到什么
 
 | PDF 版式 | 状态 | 当前能力 |
 | --- | --- | --- |
 | `score_tab`：五线谱 + 六线 TAB | **主流程支持** | PDF/整页图 → 事件、节奏、弦/品、X、延音与部分技法 → IR → GP5/PDF |
-| `tab_only`：纯六线 TAB | **实验阶段** | 能分类版式、找谱线/小节、检测数字/X并组合事件；纯 TAB 的可靠节奏恢复和默认 GP5 导出尚未完成 |
+| `tab_only`：纯六线 TAB | **主流程支持** | PDF/整页图 → 音符与休止事件、双声部节奏、弦/品、X、延音与部分技法 → IR → GP5/PDF |
 | `score_only`：纯五线谱 | **仅版式识别** | 能分类版式；仅凭音高无法唯一反推出吉他的弦/品指法，当前不导出 GP5 |
 
 主流程的有效输入范围：
 
-- TuxGuitar 2.0.1 导出的规则 `score_tab` 矢量 PDF；
+- TuxGuitar 2.0.1 导出的规则 `tab_only` 或 `score_tab` 矢量 PDF；CLI 默认自动判别两种版式；
 - 完整页面 `PNG/JPG/JPEG/BMP/TIF/TIFF`，缩放和留白接近 180-DPI TuxGuitar 页面；
 - 常规拍号、音符/和弦事件、休止、附点、连音组、TAB 多位数品位和 X；
 - 延音候选与部分和弦延音；dead/muted、vibrato、bend、hammer、slide、ghost、accent、harmonic、grace、palm mute、staccato、let ring、tapping 等技法标签；
-- 单吉他轨、主声部、六弦标准或 IR 中已知的调弦。
+- 单吉他轨、最多两个声部、六弦标准或 IR 中已知的调弦。
 
 尚不承诺：手写谱、拍照/透视、严重扫描噪声、复杂多声部、多轨、歌词/和弦图、反复结构、全部跨系统连线，以及 Guitar Pro、MuseScore、Sibelius 等其他软件的字体和排版。其他软件导出的规则谱需要加入对应真实 PDF 做域适配。
 
@@ -82,7 +82,7 @@ guitarocr D:\scores\input.pdf `
 - `document_score_ir.json`：跨页合并后的 Score Event IR；
 - 输出旁的 `.plan.tsv` / `.report.json`：写入计划、假设、格式降级和 TuxGuitar 回读结果。
 
-程序写完 GP5 后会重新读入，并检查小节数、事件位置、节奏、弦/品、延音及可表示的技法；回读不一致时命令失败。
+程序写完 GP5 后会重新读入，并逐声部检查小节数、事件位置、节奏、弦/品、延音及可表示的技法；回读不一致时命令失败。
 
 ### 整页图片输入
 
@@ -90,6 +90,11 @@ guitarocr D:\scores\input.pdf `
 python -m guitarocr.pipeline.infer_tuxguitar_score_tab_document `
   D:\pages\page_001.png D:\pages\page_002.png `
   --output D:\work\song
+
+# 纯 TAB 整页图改用这一入口
+python -m guitarocr.pipeline.infer_tuxguitar_tab_document `
+  D:\tab_pages\page_001.png D:\tab_pages\page_002.png `
+  --output D:\work\tab_song
 
 python -m guitarocr.export.export_score_ir_to_gp `
   D:\work\song\document_score_ir.json `
@@ -115,26 +120,39 @@ guitarocr-layout D:\pages\page_001.png
 
 ## 模型和本次指标
 
-默认推理读取 `weights/` 下约 17.41 MiB 的七个 checkpoint：
+默认推理读取 `weights/` 下共 28.29 MiB 的十一个 checkpoint。数字/X 和拍号模型共享，事件/节奏/延音/技法按版式使用独立模型：
 
 | 模型 | 参数量 | 作用 |
 | --- | ---: | --- |
 | `score_event_locator.pt` | 161,538 | 在五线谱小节中定位时间事件横坐标 |
 | `rhythm_context_cnn.pt` | 882,956 | 音符/休止、时值、附点、连音组等上下文 |
+| `tab_event_locator.pt` | 161,538 | 在纯 TAB 小节中定位全部音符/休止事件横坐标 |
+| `tab_rhythm_context_cnn.pt` | 882,956 | 从纯 TAB 符杆、横梁、休止与附点恢复双声部节奏 |
 | `tab_symbol_detector.pt` | 592,623 | 定位并分类 TAB 数字与 X |
 | `atomic_symbol_cnn.pt` | 218,884 | 拍号数字等原子印刷符号 |
 | `tie_context_cnn.pt` | 888,096 | 延音存在、数量和目标音高关系 |
 | `technique_context_cnn.pt` | 874,989 | 多标签演奏技法上下文 |
 | `pick_stroke_context_cnn.pt` | 875,503 | 上拨/下拨事件上下文；只覆盖主技法模型的 PickStroke 两项 |
+| `tab_tie_context_cnn.pt` | 888,096 | 纯 TAB 延音存在、数量和目标弦关系 |
+| `tab_technique_context_cnn.pt` | 875,503 | 纯 TAB 多标签演奏技法上下文 |
 
 扩大后的 TuxGuitar 语料含 331 个 GP/GTP 源文件、26,682 小节、180,417 个节奏事件裁块、318,376 个音符；TAB 检测集合含 65,953 个混合版式小节图块和 752,401 个数字/X 标注。划分按源曲目隔离。
 
 主要独立测试结果：
 
-- 节奏 CNN：主声部完整语义 99.596%，全事件 99.456%；
+- `score_tab` 节奏 CNN：主声部完整语义 99.596%，全事件 99.456%；
 - TAB 检测器：precision 99.614%、recall 99.970%、F1 99.791%，85,423 个真值中漏检 26 个；
 - 延音 CNN：presence F1 99.119%，延音数量准确率 88.950%，目标纵坐标 F1 94.422%；
 - 技法 CNN：dead F1 99.650%、vibrato 95.833%、bend 98.876%、palm mute 96.970%；slide 只有 48.415%，ghost/accent 等稀有类仍需更多真实样本。PickStroke 的独立测试只有 1 个上拨、0 个下拨，不足以证明跨曲泛化。
+
+纯 TAB 的 source-disjoint 测试共 149 页、2,874 个小节、18,397 个事件：
+
+- 页面几何 149/149 页、2,874/2,874 小节完全正确；事件定位 P 99.978%、R 100%、F1 99.989%；
+- 自动定位后主声部节奏 exact 99.750%，双声部事件 exact 99.706%；
+- 可见 TAB 事件（整组弦/品/X）exact recall 99.056%，节奏+可见指法主核心事件 exact 99.005%；
+- 视觉拍号经小节节奏容量交叉确认后为 2,874/2,874 小节正确；
+- 纯 TAB 整页延音视觉/语义候选 F1 均为 99.653%，目标弦纵坐标 F1 99.365%；自动续接事件 precision 98.464%、音符 precision 99.281%、真值音符覆盖率 98.106%；
+- 纯 TAB 技法 macro F1 83.181%，其中 slide F1 95.172%；staccato 仍为 0，tapping 与 pick-down 在测试集没有正例。
 
 目标回归曲《若能绽放光芒 Final 教学版》在最多 10 轮 hard-case 修正后达到 168/168 小节、701/701 事件、1,425/1,425 音符、61/61 个 X，以及该曲出现的 palm mute/slide/vibrato、153 个上拨和 389 个下拨全部命中。**该曲被加入过训练和规则修正，因此这是回归验收，不是独立泛化成绩。**
 
@@ -179,6 +197,7 @@ python -m guitarocr.data.augment_gpif_technique_labels <source_id> `
 .\scripts\run_rhythm_context.ps1 -SkipDatasetBuild
 .\scripts\run_score_event_locator.ps1
 .\scripts\run_tie_context.ps1
+.\scripts\run_tab_only_models.ps1
 
 python -m guitarocr.training.train_technique_context `
   --database D:\guitarocr_database --epochs 20 --batch-size 64
@@ -187,6 +206,8 @@ python -m guitarocr.training.train_technique_context `
 Copy-Item D:\guitarocr_database\technique_events\models\technique_context_cnn.pt `
   D:\guitarocr_database\technique_events\models\pick_stroke_context_cnn.pt
 ```
+
+`run_tab_only_models.ps1` 会依次构建纯 TAB 事件、节奏、技法、延音数据，训练四个版式专用模型，并执行整页事件、节奏、弦/品、合并 IR、延音和拍号的独立测试。已有数据或模型时可传 `-SkipDatasetBuild` / `-SkipTraining`。
 
 训练建议使用 NVIDIA GPU。只有 validation/test、整页 IR 和重渲染 PDF 都通过后再发布权重：
 
@@ -215,6 +236,17 @@ python -m guitarocr.training.train_tie_context `
 python -m guitarocr.training.train_technique_context `
   --database D:\guitarocr_database --epochs 8 --learning-rate 0.0001 `
   --init-checkpoint .\weights\technique_context_cnn.pt
+
+# 纯 TAB 使用相同网络结构、独立数据域和独立 checkpoint
+python -m guitarocr.training.train_rhythm_context `
+  --database D:\guitarocr_database --task-root tab_rhythm_events `
+  --epochs 8 --learning-rate 0.0002 `
+  --init-checkpoint .\weights\tab_rhythm_context_cnn.pt
+
+python -m guitarocr.training.train_tie_context `
+  --database D:\guitarocr_database --task-root tab_tie_events `
+  --epochs 8 --learning-rate 0.0001 `
+  --init-checkpoint .\weights\tab_tie_context_cnn.pt
 ```
 
 实践要求：
@@ -227,7 +259,7 @@ python -m guitarocr.training.train_technique_context `
 
 ## 为什么没有默认接入 1B OCR/LLM
 
-GLM-OCR 0.9B、HunyuanOCR 等是通用文档视觉语言模型，不直接输出本项目所需的弦号、品位、精确 onset、时值和跨事件约束。当前约 17.4 MiB 的专用 CNN + 确定性音乐约束更小、更快，也能用 GP 真值精确监督。它们可作为弱标注教师、标题/速度文字 OCR 或失败页路由器；真正适合下一步的是在 CNN 事件特征上训练约 10–30M 参数的小型事件序列 Transformer，而不是让通用 OCR 模型直接生成 GP。
+GLM-OCR 0.9B、HunyuanOCR 等是通用文档视觉语言模型，不直接输出本项目所需的弦号、品位、精确 onset、时值和跨事件约束。当前约 28.3 MiB 的专用 CNN + 确定性音乐约束更小、更快，也能用 GP 真值精确监督。它们可作为弱标注教师、标题/速度文字 OCR 或失败页路由器；真正适合下一步的是在 CNN 事件特征上训练约 10–30M 参数的小型事件序列 Transformer，而不是让通用 OCR 模型直接生成 GP。
 
 评估依据与官方项目链接见 [docs/OCR_CONTEXT_MODEL_ASSESSMENT.md](docs/OCR_CONTEXT_MODEL_ASSESSMENT.md)。
 
@@ -244,7 +276,7 @@ guitarocr/
 └─ cli/          # 命令行入口、版式分类和环境检查
 scripts/         # Windows 安装、数据构建、训练、验收和发布
 java/            # TuxGuitar 标注、写入、回读和渲染桥接
-weights/         # 七个随仓库发布的 checkpoint
+weights/         # 十一个随仓库发布的 checkpoint
 docs/            # 架构、IR、实验和上下文模型评估
 database/        # 本地生成，不提交
 ```

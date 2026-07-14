@@ -15,11 +15,19 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Validate score event-locator tiles and source splits.")
+    parser = argparse.ArgumentParser(description="Validate score or pure-TAB event-locator tiles and source splits.")
     parser.add_argument("--database", type=Path, default=DATABASE_ROOT)
+    parser.add_argument(
+        "--task-root",
+        choices=("score_event_locator", "tab_event_locator"),
+        default="score_event_locator",
+    )
     args = parser.parse_args()
     database = args.database.resolve()
-    root = database / "score_event_locator"
+    root = database / args.task_root
+    page_label_root = (
+        "score_tab_rhythm" if args.task_root == "score_event_locator" else "tab_only"
+    )
 
     sources: dict[str, str] = {}
     represented: set[tuple[str, int, int, str]] = set()
@@ -56,7 +64,7 @@ def main() -> None:
             tile_count += 1
 
     expected: set[tuple[str, int, int, str]] = set()
-    for page_path in (database / "labels" / "pages" / "score_tab_rhythm").glob("*/*.json"):
+    for page_path in (database / "labels" / "pages" / page_label_root).glob("*/*.json"):
         page = json.loads(page_path.read_text(encoding="utf-8"))
         for measure in page["measures"]:
             for event in measure["events"]:

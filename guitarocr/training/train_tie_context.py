@@ -275,6 +275,12 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20260714)
     parser.add_argument("--init-checkpoint", type=Path, help="Optional compatible tie checkpoint for fine-tuning.")
     parser.add_argument("--fresh", action="store_true", help="Initialize only from the rhythm CNN, not an older tie model.")
+    parser.add_argument(
+        "--task-root",
+        default="tie_events",
+        choices=("tie_events", "tab_tie_events"),
+        help="Train score-staff or pure-TAB tie context.",
+    )
     args = parser.parse_args()
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -284,7 +290,7 @@ def main() -> None:
         torch.backends.cudnn.benchmark = True
 
     database = args.database.resolve()
-    manifests = database / "tie_events" / "manifests"
+    manifests = database / args.task_root / "manifests"
     train_dataset = TieEventDataset(database, manifests / "train.jsonl", augment=True)
     validation_dataset = TieEventDataset(database, manifests / "validation.jsonl")
     test_dataset = TieEventDataset(database, manifests / "test.jsonl")
@@ -309,9 +315,11 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TieContextCNN().to(device)
-    rhythm_checkpoint = database / "rhythm_events" / "models" / "rhythm_context_cnn.pt"
+    rhythm_task_root = "rhythm_events" if args.task_root == "tie_events" else "tab_rhythm_events"
+    rhythm_checkpoint = database / rhythm_task_root / "models" / "rhythm_context_cnn.pt"
     load_pretrained_rhythm(model, rhythm_checkpoint, device)
-    previous_tie_checkpoint = database / "tie_events" / "models" / "tie_context_cnn.pt"
+    checkpoint_name = "tie_context_cnn.pt" if args.task_root == "tie_events" else "tab_tie_context_cnn.pt"
+    previous_tie_checkpoint = database / args.task_root / "models" / checkpoint_name
     initialization = str(rhythm_checkpoint)
     fine_tune_checkpoint = args.init_checkpoint or previous_tie_checkpoint
     if fine_tune_checkpoint.is_file() and not args.fresh:
@@ -338,11 +346,11 @@ def main() -> None:
         device=device,
     )
 
-    model_root = database / "tie_events" / "models"
-    report_root = database / "tie_events" / "reports"
+    model_root = database / args.task_root / "models"
+    report_root = database / args.task_root / "reports"
     model_root.mkdir(parents=True, exist_ok=True)
     report_root.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = model_root / "tie_context_cnn.pt"
+    checkpoint_path = model_root / checkpoint_name
     history: list[dict] = []
     best_score = -1.0
     best_epoch = 0
@@ -448,7 +456,7 @@ def main() -> None:
     )
     model.eval()
     traced = torch.jit.trace(model, torch.zeros(1, 1, INPUT_HEIGHT, INPUT_WIDTH, device=device))
-    traced.save(str(model_root / "tie_context_cnn.torchscript.pt"))
+    traced.save(str(model_root / checkpoint_name.replace(".pt", ".torchscript.pt")))
     print(json.dumps(report, ensure_ascii=False))
 
 

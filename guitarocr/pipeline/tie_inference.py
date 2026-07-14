@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 from PIL import Image
@@ -42,12 +43,16 @@ def classify_ties(
     device: torch.device,
     threshold: float,
     batch_size: int = 64,
+    crop_builder: Callable[[Image.Image, float, list[float]], tuple[Image.Image, dict]] = build_event_crop,
+    reference_line_key: str = "score_line_y",
 ) -> None:
     records: list[tuple[torch.Tensor, dict, dict]] = []
     for system in systems:
         for measure in system["measures"]:
             for event in measure["events"]:
-                crop, transform = build_event_crop(page, event["x"], system["score_line_y"])
+                crop, transform = crop_builder(
+                    page, event["x"], system[reference_line_key]
+                )
                 array = np.asarray(crop, dtype=np.float32) / 255.0
                 records.append((torch.from_numpy(1.0 - array).unsqueeze(0), event, transform))
 

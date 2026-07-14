@@ -52,6 +52,7 @@ public final class TuxGuitarIrGp5Writer {
     private record EventPlan(
             int measureIndex,
             int eventOrder,
+            int voiceIndex,
             long onsetNumerator,
             long onsetDenominator,
             int durationValue,
@@ -124,6 +125,7 @@ public final class TuxGuitarIrGp5Writer {
             System.out.println("READBACK_MEASURES=" + readback.countMeasureHeaders());
             System.out.println("READBACK_TRACKS=" + readback.countTracks());
             System.out.println("READBACK_BEATS=" + countNonEmptyBeats(readTrack));
+            System.out.println("READBACK_VOICE_EVENTS=" + countNonEmptyVoiceEvents(readTrack));
             System.out.println("READBACK_MATCHED_EVENTS=" + matched + "/" + plan.events().size());
             if (previewPath != null) {
                 System.out.println("PREVIEW_PDF=" + previewPath);
@@ -140,12 +142,12 @@ public final class TuxGuitarIrGp5Writer {
         List<Integer> tuning = new ArrayList<>();
         List<MeasurePlan> measures = new ArrayList<>();
         List<EventPlan> events = new ArrayList<>();
-        boolean header = false;
+        int planVersion = 0;
         for (String line : Files.readAllLines(path, StandardCharsets.UTF_8)) {
             if (line.isBlank()) continue;
             String[] fields = line.split("\\t", -1);
             if (fields[0].equals("GUITAROCR_PLAN")) {
-                header = fields.length == 2 && (fields[1].equals("1") || fields[1].equals("2"));
+                if (fields.length == 2) planVersion = Integer.parseInt(fields[1]);
             } else if (fields[0].equals("META")) {
                 if (fields[1].equals("TITLE_B64")) {
                     title = new String(Base64.getDecoder().decode(fields[2]), StandardCharsets.UTF_8);
@@ -159,10 +161,12 @@ public final class TuxGuitarIrGp5Writer {
                         Integer.parseInt(fields[1]), Integer.parseInt(fields[2]),
                         Integer.parseInt(fields[3]), Integer.parseInt(fields[4])));
             } else if (fields[0].equals("EVENT")) {
-                String[] division = fields[7].split(":", 2);
+                int shift = planVersion >= 3 ? 1 : 0;
+                int voiceIndex = planVersion >= 3 ? Integer.parseInt(fields[3]) : 0;
+                String[] division = fields[7 + shift].split(":", 2);
                 List<NotePlan> notes = new ArrayList<>();
-                if (!fields[9].equals("-")) {
-                    for (String encoded : fields[9].split(",")) {
+                if (!fields[9 + shift].equals("-")) {
+                    for (String encoded : fields[9 + shift].split(",")) {
                         String[] note = encoded.split(":");
                         notes.add(new NotePlan(
                                 Integer.parseInt(note[0]), Integer.parseInt(note[1]), note[2].equals("1"),
@@ -173,13 +177,17 @@ public final class TuxGuitarIrGp5Writer {
                 }
                 events.add(new EventPlan(
                         Integer.parseInt(fields[1]), Integer.parseInt(fields[2]),
-                        Long.parseLong(fields[3]), Long.parseLong(fields[4]),
-                         Integer.parseInt(fields[5]), fields[6],
+                        voiceIndex,
+                        Long.parseLong(fields[3 + shift]), Long.parseLong(fields[4 + shift]),
+                        Integer.parseInt(fields[5 + shift]), fields[6 + shift],
                          Integer.parseInt(division[0]), Integer.parseInt(division[1]),
-                         fields[8], notes, fields.length >= 11 ? Integer.parseInt(fields[10]) : 0));
+                         fields[8 + shift], notes,
+                         fields.length >= 11 + shift ? Integer.parseInt(fields[10 + shift]) : 0));
             }
         }
-        if (!header) throw new IllegalArgumentException("Unsupported or missing GuitarOCR plan header");
+        if (planVersion < 1 || planVersion > 3) {
+            throw new IllegalArgumentException("Unsupported or missing GuitarOCR plan header");
+        }
         if (measures.isEmpty()) throw new IllegalArgumentException("Plan has no measures");
         if (tuning.isEmpty()) throw new IllegalArgumentException("Plan has no tuning");
         measures.sort(Comparator.comparingInt(MeasurePlan::index));
@@ -220,19 +228,26 @@ public final class TuxGuitarIrGp5Writer {
             measureStart += fractionOfWholeToTicks(item.numerator(), item.denominator());
         }
 
+        Map<String, TGBeat> beatByPosition = new HashMap<>();
         for (EventPlan item : plan.events()) {
             TGMeasure measure = measureByIndex.get(item.measureIndex());
             if (measure == null) throw new IllegalArgumentException("Event references a missing measure");
-            TGBeat beat = factory.newBeat();
             long relativeStart = fractionOfWholeToTicks(item.onsetNumerator(), item.onsetDenominator());
             long relativePrecise = fractionOfWholeToPrecise(item.onsetNumerator(), item.onsetDenominator());
-            beat.setStart(measure.getStart() + relativeStart);
-            beat.setPreciseStart(measure.getPreciseStart() + relativePrecise);
-            beat.getPickStroke().setDirection(item.pickStroke());
-            TGVoice voice = beat.getVoice(0);
+            String beatKey = item.measureIndex() + ":" + relativePrecise;
+            TGBeat beat = beatByPosition.get(beatKey);
+            if (beat == null) {
+                beat = factory.newBeat();
+                beat.setStart(measure.getStart() + relativeStart);
+                beat.setPreciseStart(measure.getPreciseStart() + relativePrecise);
+                measure.addBeat(beat);
+                beatByPosition.put(beatKey, beat);
+            }
+            if (item.pickStroke() != 0) beat.getPickStroke().setDirection(item.pickStroke());
+            TGVoice voice = beat.getVoice(item.voiceIndex());
             if (voice == null) {
-                voice = factory.newVoice(0);
-                beat.setVoice(0, voice);
+                voice = factory.newVoice(item.voiceIndex());
+                beat.setVoice(item.voiceIndex(), voice);
             }
             voice.setEmpty(false);
             voice.getDuration().setValue(item.durationValue());
@@ -269,7 +284,6 @@ public final class TuxGuitarIrGp5Writer {
                     voice.addNote(note);
                 }
             }
-            measure.addBeat(beat);
         }
         manager.orderBeats(song);
         manager.updatePreciseStart(song);
@@ -388,6 +402,19 @@ public final class TuxGuitarIrGp5Writer {
         return count;
     }
 
+    private static int countNonEmptyVoiceEvents(TGTrack track) {
+        int count = 0;
+        for (int measureIndex = 0; measureIndex < track.countMeasures(); measureIndex++) {
+            for (TGBeat beat : track.getMeasure(measureIndex).getBeats()) {
+                for (int voiceIndex = 0; voiceIndex < beat.countVoices(); voiceIndex++) {
+                    TGVoice voice = beat.getVoice(voiceIndex);
+                    if (voice != null && !voice.isEmpty()) count++;
+                }
+            }
+        }
+        return count;
+    }
+
     private static int countMatchedEvents(Plan plan, TGSong song) {
         TGTrack track = song.getTrack(0);
         int matches = 0;
@@ -398,14 +425,15 @@ public final class TuxGuitarIrGp5Writer {
             boolean matched = false;
             for (TGBeat beat : measure.getBeats()) {
                 if (beat.getStart() != start) continue;
-                TGVoice voice = beat.getVoice(0);
+                TGVoice voice = beat.getVoice(expected.voiceIndex());
                 if (voice == null || voice.isEmpty()) continue;
                 if (voice.getDuration().getValue() != expected.durationValue()) continue;
                 if (voice.getDuration().isDotted() != expected.dot().equals("single")) continue;
                 if (voice.getDuration().isDoubleDotted() != expected.dot().equals("double")) continue;
                 if (voice.getDuration().getDivision().getEnters() != expected.divisionEnters()) continue;
                 if (voice.getDuration().getDivision().getTimes() != expected.divisionTimes()) continue;
-                if (beat.getPickStroke().getDirection() != expected.pickStroke()) continue;
+                if (expected.pickStroke() != 0
+                        && beat.getPickStroke().getDirection() != expected.pickStroke()) continue;
                 if (!notesMatch(expected, voice)) continue;
                 matches++;
                 matched = true;
@@ -415,7 +443,7 @@ public final class TuxGuitarIrGp5Writer {
                 StringBuilder actualAtStart = new StringBuilder();
                 for (TGBeat beat : measure.getBeats()) {
                     if (beat.getStart() != start) continue;
-                    TGVoice voice = beat.getVoice(0);
+                    TGVoice voice = beat.getVoice(expected.voiceIndex());
                     if (voice == null) continue;
                     actualAtStart.append("[dur=").append(voice.getDuration().getValue())
                             .append(" dot=").append(voice.getDuration().isDotted())
@@ -436,7 +464,8 @@ public final class TuxGuitarIrGp5Writer {
                     actualAtStart.append("]");
                 }
                 System.out.println("UNMATCHED_EVENT=m" + (expected.measureIndex() + 1)
-                        + " e" + expected.eventOrder() + " start=" + start
+                        + " e" + expected.eventOrder() + " v" + expected.voiceIndex()
+                        + " start=" + start
                         + " dur=" + expected.durationValue() + " dot=" + expected.dot()
                         + " div=" + expected.divisionEnters() + ":" + expected.divisionTimes()
                         + " state=" + expected.state() + " notes=" + expected.notes()

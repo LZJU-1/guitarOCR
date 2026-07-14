@@ -19,17 +19,39 @@ LOCAL_POPPLER_BIN = PROJECT_ROOT / "tools" / "poppler" / "Library" / "bin"
 
 
 def find_poppler_program(name: str) -> Path:
+    executable = f"{name}.exe"
     configured = os.environ.get("GUITAROCR_POPPLER_BIN")
     if configured:
-        candidate = Path(configured) / f"{name}.exe"
+        candidate = Path(configured) / executable
         if candidate.is_file():
             return candidate
-    local = LOCAL_POPPLER_BIN / f"{name}.exe"
+    local = LOCAL_POPPLER_BIN / executable
     if local.is_file():
         return local
     located = shutil.which(name)
     if located:
-        return Path(located)
+        located_path = Path(located).resolve()
+        if located_path.suffix.lower() == ".exe":
+            return located_path
+
+        # Some managed Windows runtimes put a .cmd shim on PATH.  Prefer the
+        # underlying executable when it is available: batch shims can break on
+        # stale relative paths even though the Poppler installation is intact.
+        dependency_root = next(
+            (parent for parent in located_path.parents if parent.name == "dependencies"),
+            None,
+        )
+        shim_candidates = [
+            located_path.parent.parent / "Library" / "bin" / executable,
+        ]
+        if dependency_root is not None:
+            shim_candidates.append(
+                dependency_root / "native" / "poppler" / "Library" / "bin" / executable
+            )
+        for candidate in shim_candidates:
+            if candidate.is_file():
+                return candidate.resolve()
+        return located_path
     raise FileNotFoundError(
         f"{name} was not found. Install Poppler or set GUITAROCR_POPPLER_BIN to its bin directory."
     )

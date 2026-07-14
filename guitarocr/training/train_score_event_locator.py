@@ -201,6 +201,12 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=20260713)
     parser.add_argument("--init-checkpoint", type=Path, help="Optional compatible checkpoint for fine-tuning.")
+    parser.add_argument(
+        "--task-root",
+        default="score_event_locator",
+        choices=("score_event_locator", "tab_event_locator"),
+        help="Train on score-staff or pure-TAB event locator tiles.",
+    )
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -210,7 +216,7 @@ def main() -> None:
     torch.backends.cudnn.benchmark = True
 
     database = args.database.resolve()
-    manifest_root = database / "score_event_locator" / "manifests"
+    manifest_root = database / args.task_root / "manifests"
     train_set = ScoreEventDataset(database, manifest_root / "train.jsonl", augment=True)
     validation_set = ScoreEventDataset(database, manifest_root / "validation.jsonl")
     test_set = ScoreEventDataset(database, manifest_root / "test.jsonl")
@@ -235,11 +241,15 @@ def main() -> None:
         model.load_state_dict(initial["model_state"])
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
-    model_root = database / "score_event_locator" / "models"
-    report_root = database / "score_event_locator" / "reports"
+    model_root = database / args.task_root / "models"
+    report_root = database / args.task_root / "reports"
     model_root.mkdir(parents=True, exist_ok=True)
     report_root.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = model_root / "score_event_locator.pt"
+    checkpoint_name = (
+        "score_event_locator.pt"
+        if args.task_root == "score_event_locator" else "tab_event_locator.pt"
+    )
+    checkpoint_path = model_root / checkpoint_name
 
     print(json.dumps({
         "device": str(device), "torch": torch.__version__, "parameters": parameter_count(model),
@@ -285,7 +295,7 @@ def main() -> None:
                     "best_validation_f1_at_025": best_f1,
                     "input_size": [INPUT_WIDTH, INPUT_HEIGHT],
                     "output_stride": OUTPUT_STRIDE,
-                    "scope": "Ground-truth measure/score geometry; event x-axis localisation.",
+                    "scope": f"Ground-truth measure geometry; {args.task_root} event x-axis localisation.",
                 },
                 checkpoint_path,
             )
@@ -310,7 +320,7 @@ def main() -> None:
         "validation": calibrated,
         "test": test,
         "scope_warning": (
-            "Tile metrics use ground-truth measure and score-staff geometry. "
+            f"Tile metrics use ground-truth measure geometry for {args.task_root}. "
             "Pixel-only page geometry and duplicate merging require separate evaluation."
         ),
     }
@@ -322,7 +332,8 @@ def main() -> None:
     )
     model.eval()
     traced = torch.jit.trace(model, torch.zeros(1, 1, INPUT_HEIGHT, INPUT_WIDTH, device=device))
-    traced.save(str(model_root / "score_event_locator.torchscript.pt"))
+    traced_name = checkpoint_name.replace(".pt", ".torchscript.pt")
+    traced.save(str(model_root / traced_name))
     print(json.dumps(final_report, ensure_ascii=False))
 
 

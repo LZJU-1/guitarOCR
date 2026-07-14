@@ -7,11 +7,14 @@ from pathlib import Path
 from PIL import Image
 import torch
 
+from guitarocr.data.build_score_rhythm_dataset import build_event_crop
+from guitarocr.data.build_tab_rhythm_dataset import build_tab_event_crop
 from guitarocr.models.rhythm_context_model import RhythmContextCNN
 from guitarocr.models.score_event_locator_model import ScoreEventLocator
 from guitarocr.models.tab_detector_model import TabSymbolDetector
 from guitarocr.paths import DATABASE_ROOT
 from guitarocr.pipeline.infer_tuxguitar_score_tab_page import classify_rhythm, locate_page_events
+from guitarocr.pipeline.infer_tuxguitar_tab_document import locate_tab_page_events
 from guitarocr.pipeline.score_tab_fingering import build_score_ir, detect_tab_fingering, resolve_unambiguous_ties
 from guitarocr.pipeline.tie_inference import classify_ties, load_tie_model
 
@@ -36,7 +39,12 @@ def metrics(tp: int, fp: int, fn: int, negatives: int) -> dict:
 
 
 def truth_tied_notes(event: dict) -> list[dict]:
-    return [note for voice in event["voices"] for note in voice["notes"] if note["tied"]]
+    return [
+        note
+        for voice in event.get("voices", [])
+        for note in voice.get("notes", [])
+        if note.get("tied")
+    ]
 
 
 def match_y(predicted: list[float], truth: list[float], tolerance: float) -> int:
@@ -60,19 +68,27 @@ def main() -> None:
     parser.add_argument("--event-threshold", type=float, default=0.3)
     parser.add_argument("--tab-threshold", type=float, default=0.3)
     parser.add_argument("--tie-threshold", type=float)
+    parser.add_argument(
+        "--layout", choices=("score_tab", "tab_only"), default="score_tab"
+    )
     args = parser.parse_args()
     database = args.database.resolve()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    locator_root = "score_event_locator" if args.layout == "score_tab" else "tab_event_locator"
+    locator_name = "score_event_locator.pt" if args.layout == "score_tab" else "tab_event_locator.pt"
+    rhythm_root = "rhythm_events" if args.layout == "score_tab" else "tab_rhythm_events"
+    tie_root = "tie_events" if args.layout == "score_tab" else "tab_tie_events"
+    page_label_root = "score_tab_rhythm" if args.layout == "score_tab" else "tab_only"
     locator_checkpoint = torch.load(
-        database / "score_event_locator" / "models" / "score_event_locator.pt",
+        database / locator_root / "models" / locator_name,
         map_location=device, weights_only=False,
     )
     locator = ScoreEventLocator().to(device)
     locator.load_state_dict(locator_checkpoint["model_state"])
     locator.eval()
     rhythm_checkpoint = torch.load(
-        database / "rhythm_events" / "models" / "rhythm_context_cnn.pt",
+        database / rhythm_root / "models" / "rhythm_context_cnn.pt",
         map_location=device, weights_only=False,
     )
     rhythm = RhythmContextCNN().to(device)
@@ -87,14 +103,16 @@ def main() -> None:
     tab.load_state_dict(tab_checkpoint["model_state"])
     tab.eval()
     tie, tie_threshold = load_tie_model(
-        database / "tie_events" / "models" / "tie_context_cnn.pt", device
+        database / tie_root / "models" / (
+            "tie_context_cnn.pt" if args.layout == "score_tab" else "tab_tie_context_cnn.pt"
+        ), device
     )
     if args.tie_threshold is not None:
         tie_threshold = args.tie_threshold
 
     source_ids = sorted({
         record["source_id"]
-        for record in read_jsonl(database / "tie_events" / "manifests" / f"{args.split}.jsonl")
+        for record in read_jsonl(database / tie_root / "manifests" / f"{args.split}.jsonl")
     })
     visual_tp = visual_fp = visual_fn = visual_tn = 0
     candidate_tp = candidate_fp = candidate_fn = candidate_tn = 0
@@ -108,17 +126,38 @@ def main() -> None:
     for source_id in source_ids:
         document_measures: list[dict] = []
         truth_by_predicted_key: dict[tuple[int, int], dict] = {}
+        semantic_events: dict[tuple[int, int], dict] = {}
+        if args.layout == "tab_only":
+            for semantic_path in sorted(
+                (database / "labels" / "pages" / "score_tab_rhythm" / source_id).glob("page_*.json")
+            ):
+                semantic_page = json.loads(semantic_path.read_text(encoding="utf-8"))
+                for measure in semantic_page["measures"]:
+                    for event in measure["events"]:
+                        semantic_events[(int(measure["measure_number"]), int(event["beat_index"]))] = event
         for page_path in sorted(
-            (database / "labels" / "pages" / "score_tab_rhythm" / source_id).glob("page_*.json")
+            (database / "labels" / "pages" / page_label_root / source_id).glob("page_*.json")
         ):
             page_count += 1
             page_label = json.loads(page_path.read_text(encoding="utf-8"))
             with Image.open(database / page_label["image"]) as opened:
                 page = opened.convert("L")
-            systems = locate_page_events(page, locator, device, args.event_threshold)
-            classify_rhythm(page, systems, rhythm, device, crop_root=None)
+            systems = (
+                locate_page_events(page, locator, device, args.event_threshold)
+                if args.layout == "score_tab"
+                else locate_tab_page_events(page, locator, device, args.event_threshold)
+            )
+            classify_rhythm(
+                page, systems, rhythm, device, crop_root=None,
+                crop_builder=build_tab_event_crop if args.layout == "tab_only" else build_event_crop,
+                reference_line_key="tab_string_y" if args.layout == "tab_only" else "score_line_y",
+            )
             detect_tab_fingering(page, systems, tab, tab_classes, device, threshold=args.tab_threshold)
-            classify_ties(page, systems, tie, device, tie_threshold)
+            classify_ties(
+                page, systems, tie, device, tie_threshold,
+                crop_builder=build_tab_event_crop if args.layout == "tab_only" else build_event_crop,
+                reference_line_key="tab_string_y" if args.layout == "tab_only" else "score_line_y",
+            )
             truth_measures = page_label["measures"]
             offset = int(truth_measures[0]["measure_number"])
             score_ir = build_score_ir(systems, measure_number_offset=offset)
@@ -132,14 +171,24 @@ def main() -> None:
                 predictions = predicted_measure["events"]
                 truths = truth_measure["events"]
                 truth_event_count += len(truths)
-                spacing = (
-                    truth_measure["score_staff"]["line_y"][-1]
-                    - truth_measure["score_staff"]["line_y"][0]
-                ) / 4.0
+                reference_y = (
+                    truth_measure["score_staff"]["line_y"]
+                    if args.layout == "score_tab"
+                    else truth_measure["tab_staff"]["string_y"]
+                )
+                spacing = (reference_y[-1] - reference_y[0]) / (len(reference_y) - 1)
                 unmatched = set(range(len(predictions)))
                 matched_truth: set[int] = set()
                 for truth_index, truth_event in enumerate(truths):
-                    tied_notes = truth_tied_notes(truth_event)
+                    semantic_event = (
+                        truth_event
+                        if args.layout == "score_tab"
+                        else semantic_events.get(
+                            (int(truth_measure["measure_number"]), int(truth_event["beat_index"])),
+                            {},
+                        )
+                    )
+                    tied_notes = truth_tied_notes(semantic_event)
                     truth_positive = bool(tied_notes)
                     truth_tie_events += int(truth_positive)
                     truth_tie_notes_count += len(tied_notes)
@@ -167,7 +216,7 @@ def main() -> None:
                     matched_truth.add(truth_index)
                     matched_event_count += 1
                     prediction = predictions[prediction_index]
-                    truth_by_predicted_key[(int(predicted_measure["number"]), int(prediction["order"]))] = truth_event
+                    truth_by_predicted_key[(int(predicted_measure["number"]), int(prediction["order"]))] = semantic_event
                     relation = prediction["tie_relation"]
                     visual_positive = bool(relation["visual_positive"])
                     candidate = bool(relation["candidate"])
@@ -184,7 +233,11 @@ def main() -> None:
                         count_exact += int(int(relation["candidate_tie_count"]) == len(tied_notes))
                     if candidate:
                         predicted_y = relation["target_y_page"]
-                        truth_y = [float(note["center_y"]) for note in tied_notes]
+                        truth_y = (
+                            [float(note["center_y"]) for note in tied_notes]
+                            if args.layout == "score_tab"
+                            else [float(reference_y[int(note["string"]) - 1]) for note in tied_notes]
+                        )
                         y_matched += match_y(predicted_y, truth_y, tolerance=spacing * 0.5)
                         y_predicted += len(predicted_y)
                         y_truth += len(truth_y)
@@ -229,6 +282,7 @@ def main() -> None:
     y_recall = y_matched / max(1, y_truth)
     report = {
         "split": args.split,
+        "layout": args.layout,
         "tie_threshold": tie_threshold,
         "sources": source_ids,
         "pages": page_count,
@@ -238,7 +292,7 @@ def main() -> None:
         "truth_tie_events": truth_tie_events,
         "truth_tie_notes": truth_tie_notes_count,
         "visual_presence": metrics(visual_tp, visual_fp, visual_fn, visual_tn),
-        "score_tab_consistent_candidate": metrics(candidate_tp, candidate_fp, candidate_fn, candidate_tn),
+        "semantic_consistent_candidate": metrics(candidate_tp, candidate_fp, candidate_fn, candidate_tn),
         "candidate_tie_count_accuracy": count_exact / max(1, count_support),
         "candidate_tie_count_exact": count_exact,
         "candidate_tie_count_support": count_support,
@@ -261,11 +315,11 @@ def main() -> None:
         },
         "scope_warning": (
             f"This split contains only {truth_tie_events} positive tie events. Auto-resolution intentionally handles only "
-            "adjacent full-event continuations; partial chords and non-adjacent/cross-system candidates remain unresolved."
+            "string-local continuations with an unambiguous visual target; ambiguous candidates remain unresolved."
         ),
         "errors": errors,
     }
-    output = database / "tie_events" / "models" / f"page_{args.split}_metrics.json"
+    output = database / tie_root / "models" / f"page_{args.split}_metrics.json"
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({key: value for key, value in report.items() if key != "errors"}, ensure_ascii=False))
 

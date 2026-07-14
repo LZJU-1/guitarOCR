@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "guitarocr"
 version = "0.1.0"
-description = "TuxGuitar-oriented score+TAB PDF recognition and GP5 reconstruction"
+description = "TuxGuitar-oriented pure-TAB/score+TAB PDF recognition and GP5 reconstruction"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = [

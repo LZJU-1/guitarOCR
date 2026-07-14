@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -95,12 +96,16 @@ def classify_rhythm(
     pick_stroke_classes: list[str] | None = None,
     pick_stroke_thresholds: list[float] | None = None,
     batch_size: int = 64,
+    crop_builder: Callable[[Image.Image, float, list[float]], tuple[Image.Image, dict]] = build_event_crop,
+    reference_line_key: str = "score_line_y",
 ) -> None:
     records: list[tuple[torch.Tensor, dict, str]] = []
     for system in systems:
         for measure in system["measures"]:
             for event_index, event in enumerate(measure["events"]):
-                crop, transform = build_event_crop(page, event["x"], system["score_line_y"])
+                crop, transform = crop_builder(
+                    page, event["x"], system[reference_line_key]
+                )
                 sample_id = f"s{system['system_index']:02d}_m{measure['measure_number']:03d}_e{event_index:03d}"
                 if crop_root is not None:
                     crop.save(crop_root / f"{sample_id}.png", format="PNG", optimize=True)

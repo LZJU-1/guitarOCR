@@ -40,10 +40,11 @@ def detect_tab_geometry(image: Image.Image) -> list[dict]:
     row_groups = group_runs(np.where(longest_runs >= minimum_line_run)[0])
     candidate_rows = [max(group, key=lambda y: int(longest_runs[y])) for group in row_groups]
     chains: list[list[int]] = []
+    minimum_string_spacing = max(8.0, height * 0.006)
     for row_index, first_y in enumerate(candidate_rows):
         for second_y in candidate_rows[row_index + 1 :]:
             spacing = second_y - first_y
-            if spacing < 8:
+            if spacing < minimum_string_spacing:
                 continue
             if spacing > 40:
                 break
@@ -61,11 +62,34 @@ def detect_tab_geometry(image: Image.Image) -> list[dict]:
                 current = min(options, key=lambda value: abs(value - expected))
                 chain.append(current)
             if len(chain) >= 4:
-                chains.append(chain)
+                # Keep prefixes as candidates. Dense TAB beams below the
+                # sixth string can continue at exactly one string spacing and
+                # otherwise turn a real six-string staff into a false 7/8-line
+                # chain. True string rows have comparable page-wide ink,
+                # whereas appended beam rows are much shorter.
+                for length in range(4, len(chain) + 1):
+                    chains.append(chain[:length])
 
-    chains.sort(key=lambda chain: (-len(chain), chain[0]))
+    row_ink = black.sum(axis=1)
+
+    def chain_quality(chain: list[int]) -> tuple[float, int, float, int]:
+        strengths = np.asarray([row_ink[value] for value in chain], dtype=np.float32)
+        median = float(np.median(strengths))
+        consistency = float(strengths.min() / max(1.0, median))
+        return consistency, -abs(len(chain) - 6), median, len(chain)
+
+    chains.sort(
+        key=lambda chain: (
+            -len(chain),
+            -chain_quality(chain)[0],
+            -chain_quality(chain)[2],
+            chain[0],
+        )
+    )
     selected: list[list[int]] = []
     for chain in chains:
+        if chain_quality(chain)[0] < 0.75:
+            continue
         if any(set(chain) & set(existing) for existing in selected):
             continue
         selected.append(chain)

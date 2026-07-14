@@ -3,8 +3,23 @@ from __future__ import annotations
 import math
 from fractions import Fraction
 
+from guitarocr.pipeline.time_signature_recognizer import SUPPORTED_SIGNATURES
+
 
 PROPOSAL_RELATIVE_PROBABILITY_THRESHOLD = 0.20
+
+
+SIGNATURE_PREFERENCE_BY_CAPACITY = {
+    Fraction(1, 4): (1, 4),
+    Fraction(1, 2): (2, 4),
+    Fraction(5, 8): (5, 8),
+    Fraction(3, 4): (3, 4),
+    Fraction(1, 1): (4, 4),
+    Fraction(5, 4): (5, 4),
+    Fraction(3, 2): (6, 4),
+    Fraction(2, 1): (8, 4),
+    Fraction(9, 4): (9, 4),
+}
 
 
 def duration_fraction(duration_value: int, dot: str, division: str) -> Fraction:
@@ -16,6 +31,141 @@ def duration_fraction(duration_value: int, dot: str, division: str) -> Fraction:
     enters, times = (int(part) for part in division.split(":", 1))
     value *= Fraction(times, enters)
     return value
+
+
+def primary_voice_total(measure: dict) -> Fraction:
+    total = Fraction(0, 1)
+    for event in measure.get("events", []):
+        voice = next(
+            (item for item in event.get("voices", []) if int(item.get("voice", -1)) == 0),
+            None,
+        )
+        if voice is None or voice.get("state") == "empty":
+            continue
+        total += duration_fraction(
+            int(voice["duration_value"]), str(voice["dot"]), str(voice["division"])
+        )
+    return total
+
+
+def capacity_signature(
+    total: Fraction,
+    current: tuple[int, int] | None,
+    numerator_digit_count: int | None = None,
+) -> tuple[int, int] | None:
+    candidates = sorted(
+        signature for signature in SUPPORTED_SIGNATURES
+        if Fraction(signature[0], signature[1]) == total
+    )
+    if not candidates:
+        return None
+    if current in candidates:
+        return current
+    digit_count_matches = [
+        signature for signature in candidates
+        if len(str(signature[0])) == numerator_digit_count
+    ]
+    if numerator_digit_count is not None and len(digit_count_matches) == 1:
+        return digit_count_matches[0]
+    preferred = SIGNATURE_PREFERENCE_BY_CAPACITY.get(total)
+    if preferred in candidates:
+        return preferred
+    return candidates[0]
+
+
+def refine_time_signatures_from_rhythm(score_ir: dict) -> dict:
+    """Cross-check pure-TAB visual meters against predicted measure capacity.
+
+    TuxGuitar writes a complete rhythmic voice, including rests, in every
+    measure.  We therefore trust an exact supported capacity at a visually
+    printed signature, and across a run of at least two measures.  Isolated
+    disagreements without a printed signature stay unchanged so one bad
+    rhythm class cannot invent a meter change.
+    """
+    summary = {
+        "measures": 0,
+        "capacity_supported": 0,
+        "visually_confirmed_changes": 0,
+        "sequence_confirmed_changes": 0,
+        "unchanged": 0,
+    }
+    for track in score_ir.get("tracks", []):
+        measures = track.get("measures", [])
+        totals = [primary_voice_total(measure) for measure in measures]
+        for index, (measure, total) in enumerate(zip(measures, totals)):
+            summary["measures"] += 1
+            raw_current = measure.get("time_signature")
+            current = (
+                (int(raw_current[0]), int(raw_current[1]))
+                if raw_current and len(raw_current) == 2 else None
+            )
+            shape_hint = measure.get("printed_time_signature_shape_hint") or {}
+            numerator_digit_count = shape_hint.get("numerator_digit_count")
+            inferred = capacity_signature(total, current, numerator_digit_count)
+            if inferred is None:
+                summary["unchanged"] += 1
+                continue
+            summary["capacity_supported"] += 1
+            if inferred == current:
+                summary["unchanged"] += 1
+                continue
+            printed = measure.get("printed_time_signature")
+            visual_candidate = (
+                measure.get("printed_time_signature_candidate") or printed
+            )
+            candidate_confidence = (
+                float(visual_candidate.get("confidence", 0.0))
+                if visual_candidate is not None else 0.0
+            )
+            candidate_bbox = (
+                visual_candidate.get("bbox") if visual_candidate is not None else None
+            )
+            measure_bbox = measure.get("bbox")
+            spacing = float(measure.get("tab_spacing") or 0.0)
+            candidate_shape = bool(
+                candidate_bbox
+                and measure_bbox
+                and spacing > 0.0
+                and float(candidate_bbox[2]) >= 0.75 * spacing
+                and 0.0 <= float(visual_candidate["x"]) - float(measure_bbox[0]) <= 4.0 * spacing
+            )
+            neighbouring_support = any(
+                0 <= neighbour < len(totals) and totals[neighbour] == total
+                for neighbour in (index - 1, index + 1)
+            )
+            # A high-confidence printed reading wins over one isolated rhythm
+            # disagreement. Low-confidence stacked ink still proves that a
+            # meter was printed, while the rhythmic capacity disambiguates its
+            # digits (notably TuxGuitar's TAB-only 2 versus 9 shape).
+            partial_shape_support = bool(
+                numerator_digit_count is not None
+                and float(shape_hint.get("confidence", 0.0)) >= 0.50
+                and len([
+                    signature for signature in SUPPORTED_SIGNATURES
+                    if Fraction(signature[0], signature[1]) == total
+                ]) > 1
+                and len([
+                    signature for signature in SUPPORTED_SIGNATURES
+                    if Fraction(signature[0], signature[1]) == total
+                    and len(str(signature[0])) == numerator_digit_count
+                ]) == 1
+            )
+            visually_confirmed = (
+                candidate_shape and (candidate_confidence < 0.40 or neighbouring_support)
+            ) or partial_shape_support
+            if not visually_confirmed and not neighbouring_support:
+                summary["unchanged"] += 1
+                continue
+            measure["time_signature_visual"] = list(current) if current is not None else None
+            measure["time_signature"] = list(inferred)
+            measure["time_signature_source"] = (
+                "printed_rhythm_capacity" if visually_confirmed else "rhythm_capacity_sequence"
+            )
+            measure["time_signature_capacity_evidence"] = fraction_json(total)
+            key = "visually_confirmed_changes" if visually_confirmed else "sequence_confirmed_changes"
+            summary[key] += 1
+    score_ir["time_signature_refinement"] = summary
+    return summary
 
 
 def fraction_json(value: Fraction) -> dict:

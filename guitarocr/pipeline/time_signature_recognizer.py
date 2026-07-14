@@ -11,7 +11,20 @@ import torch
 from guitarocr.models.symbol_model import AtomicSymbolCNN
 
 
-SUPPORTED_SIGNATURES = {(1, 4), (2, 4), (3, 4), (4, 4), (6, 4), (6, 8), (9, 4), (10, 8)}
+SUPPORTED_SIGNATURES = {
+    (1, 4), (1, 8),
+    (2, 2), (2, 4),
+    (3, 4), (3, 8),
+    (4, 4),
+    (5, 4), (5, 8),
+    (6, 4), (6, 8),
+    (7, 8),
+    (8, 4), (8, 8),
+    (9, 4), (9, 8),
+    (10, 8), (11, 8), (12, 8),
+    (13, 4), (13, 8), (15, 8),
+    (23, 16),
+}
 
 
 def prepare_component(image: np.ndarray) -> Image.Image:
@@ -292,8 +305,10 @@ def recognize_printed_time_signature(
     classes: list[str],
     device: torch.device,
     threshold: float = 0.45,
+    components: list[dict] | None = None,
 ) -> dict | None:
-    components = component_candidates(page, measure, system, model, classes, device)
+    if components is None:
+        components = component_candidates(page, measure, system, model, classes, device)
     middle = float(system["score_line_y"][2])
     spacing = float(system["score_spacing"])
     top_components = [item for item in components if item["center_y"] < middle - 0.10 * spacing]
@@ -301,31 +316,79 @@ def recognize_printed_time_signature(
     numerator_groups = digit_groups(top_components, spacing)
     denominator_groups = digit_groups(bottom_components, spacing)
     candidates: list[dict] = stacked_signature_candidates(page, measure, system, model, classes, device)
-    for numerator in numerator_groups:
-        if not 1 <= numerator["value"] <= 32:
-            continue
-        for denominator in denominator_groups:
-            if denominator["value"] not in {2, 4, 8, 16}:
+    # In pure TAB, vertically aligned fret numbers from a chord look exactly
+    # like the old loose top/bottom-component fallback.  A genuine TuxGuitar
+    # signature is one tall connected stack after the TAB lines are removed,
+    # so only accept that stronger shape.  score_tab keeps the fallback for
+    # historical PDFs where the score staff can split a signature in two.
+    if system.get("layout") != "tab_only":
+        for numerator in numerator_groups:
+            if not 1 <= numerator["value"] <= 32:
                 continue
-            alignment = abs(numerator["center_x"] - denominator["center_x"])
-            if alignment > 1.1 * spacing:
-                continue
-            confidence = math.sqrt(max(0.0, numerator["confidence"] * denominator["confidence"]))
-            confidence *= math.exp(-alignment / max(1.0, spacing))
-            candidates.append(
-                {
-                    "numerator": numerator["value"],
-                    "denominator": denominator["value"],
-                    "confidence": confidence,
-                    "x": (numerator["center_x"] + denominator["center_x"]) / 2.0,
-                    "components": numerator["digits"] + denominator["digits"],
-                    "method": "paired_components",
-                }
-            )
+            for denominator in denominator_groups:
+                if denominator["value"] not in {2, 4, 8, 16}:
+                    continue
+                if (numerator["value"], denominator["value"]) not in SUPPORTED_SIGNATURES:
+                    continue
+                alignment = abs(numerator["center_x"] - denominator["center_x"])
+                if alignment > 1.1 * spacing:
+                    continue
+                confidence = math.sqrt(max(0.0, numerator["confidence"] * denominator["confidence"]))
+                confidence *= math.exp(-alignment / max(1.0, spacing))
+                candidates.append(
+                    {
+                        "numerator": numerator["value"],
+                        "denominator": denominator["value"],
+                        "confidence": confidence,
+                        "x": (numerator["center_x"] + denominator["center_x"]) / 2.0,
+                        "components": numerator["digits"] + denominator["digits"],
+                        "method": "paired_components",
+                    }
+                )
     if not candidates:
         return None
     best = max(candidates, key=lambda item: item["confidence"])
     return best if best["confidence"] >= threshold else None
+
+
+def partial_time_signature_hint(
+    page: Image.Image,
+    measure: dict,
+    system: dict,
+    model: AtomicSymbolCNN,
+    classes: list[str],
+    device: torch.device,
+    components: list[dict] | None = None,
+) -> dict | None:
+    """Recover the digit count of a clipped multi-digit TAB numerator.
+
+    At a system edge, TAB-line removal can erase the denominator while the two
+    numerator glyphs remain. The hint never changes a meter by itself; rhythm
+    capacity must first narrow the choice to equivalent signatures such as
+    5/4 versus 10/8.
+    """
+    spacing = float(system["score_spacing"])
+    measure_left = float(measure["bbox"][0])
+    middle = float(system["score_line_y"][2])
+    if components is None:
+        components = component_candidates(page, measure, system, model, classes, device)
+    components = [
+        item for item in components
+        if item["center_y"] < middle - 0.10 * spacing
+        and 0.0 <= item["bbox"][0] - measure_left <= 2.0 * spacing
+        and float(item["global_probability"]) >= 0.50
+    ]
+    for group in digit_groups(components, spacing):
+        digits = group["digits"]
+        if len(digits) != 2:
+            continue
+        return {
+            "numerator_digit_count": 2,
+            "confidence": float(group["confidence"]),
+            "x": float(group["center_x"]),
+            "method": "partial_numerator_shape",
+        }
+    return None
 
 
 def propagate_time_signatures(
@@ -340,9 +403,28 @@ def propagate_time_signatures(
     current = initial
     for system in systems:
         for measure in system["measures"]:
-            printed = recognize_printed_time_signature(page, measure, system, model, classes, device, threshold)
+            components = component_candidates(
+                page, measure, system, model, classes, device
+            )
+            candidate = recognize_printed_time_signature(
+                page, measure, system, model, classes, device,
+                threshold=0.0, components=components,
+            )
+            partial_hint = partial_time_signature_hint(
+                page, measure, system, model, classes, device,
+                components=components,
+            )
+            printed = (
+                candidate
+                if candidate is not None and float(candidate["confidence"]) >= threshold
+                else None
+            )
             if printed is not None:
                 current = (int(printed["numerator"]), int(printed["denominator"]))
+            # Keep a sub-threshold stacked shape for the later rhythm-capacity
+            # cross-check. It does not alter propagation on its own.
+            measure["printed_time_signature_candidate"] = candidate
+            measure["printed_time_signature_shape_hint"] = partial_hint
             measure["printed_time_signature"] = printed
             measure["time_signature"] = list(current) if current is not None else None
             measure["time_signature_source"] = "printed" if printed is not None else "carried" if current is not None else "unknown"

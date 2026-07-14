@@ -27,10 +27,10 @@ def write_jsonl(path: Path, records: list[dict]) -> None:
     )
 
 
-def load_rhythm_records(database: Path) -> dict[str, dict]:
+def load_rhythm_records(database: Path, task_root: str) -> dict[str, dict]:
     records: dict[str, dict] = {}
     for split in ("train", "validation", "test"):
-        manifest = database / "rhythm_events" / "manifests" / f"{split}.jsonl"
+        manifest = database / task_root / "manifests" / f"{split}.jsonl"
         for record in read_jsonl(manifest):
             sample_id = record["sample_id"]
             if sample_id in records:
@@ -68,30 +68,49 @@ def main() -> None:
     )
     parser.add_argument("--database", type=Path, default=DATABASE_ROOT)
     parser.add_argument(
+        "--layout",
+        choices=("score_tab", "tab_only"),
+        default="score_tab",
+        help="Build score-staff or pure-TAB tie context labels.",
+    )
+    parser.add_argument(
         "--positive-validation-source",
         default=DEFAULT_POSITIVE_VALIDATION_SOURCE,
         help="A global-train source held out for positive tie validation because the global validation songs contain none.",
     )
     args = parser.parse_args()
     database = args.database.resolve()
-    rhythm_records = load_rhythm_records(database)
+    rhythm_task_root = "rhythm_events" if args.layout == "score_tab" else "tab_rhythm_events"
+    rhythm_records = load_rhythm_records(database, rhythm_task_root)
     global_validation = {
         record["source_id"] for record in rhythm_records.values() if record["split"] == "validation"
     }
     global_test = {
         record["source_id"] for record in rhythm_records.values() if record["split"] == "test"
     }
-    output_root = database / "tie_events"
+    output_root = database / ("tie_events" if args.layout == "score_tab" else "tab_tie_events")
     manifest_root = output_root / "manifests"
     overlay_root = output_root / "overlays"
     manifests: dict[str, list[dict]] = {split: [] for split in ("train", "validation", "test")}
     counts: dict[str, Counter] = {split: Counter() for split in manifests}
 
-    source_roots = sorted((database / "labels" / "pages" / "score_tab_rhythm").iterdir())
+    page_task_root = "score_tab_rhythm" if args.layout == "score_tab" else "tab_only"
+    source_roots = sorted((database / "labels" / "pages" / page_task_root).iterdir())
     for source_root in source_roots:
         if not source_root.is_dir():
             continue
         source_id = source_root.name
+        semantic_events: dict[tuple[int, int], dict] = {}
+        if args.layout == "tab_only":
+            semantic_root = database / "labels" / "pages" / "score_tab_rhythm" / source_id
+            for semantic_path in sorted(semantic_root.glob("page_*.json")):
+                semantic_page = json.loads(semantic_path.read_text(encoding="utf-8"))
+                for semantic_measure in semantic_page["measures"]:
+                    for semantic_event in semantic_measure["events"]:
+                        semantic_events[(
+                            int(semantic_measure["measure_number"]),
+                            int(semantic_event["beat_index"]),
+                        )] = semantic_event
         split = choose_split(
             source_id, global_validation, global_test, args.positive_validation_source
         )
@@ -101,8 +120,13 @@ def main() -> None:
                 note["tied"]
                 for measure in page_label["measures"]
                 for event in measure["events"]
-                for voice in event["voices"]
-                for note in voice["notes"]
+                for voice in (
+                    semantic_events.get(
+                        (int(measure["measure_number"]), int(event["beat_index"])),
+                        event,
+                    ).get("voices", [])
+                )
+                for note in voice.get("notes", [])
             )
             overlay = None
             draw = None
@@ -112,11 +136,18 @@ def main() -> None:
                 draw = ImageDraw.Draw(overlay)
 
             for measure in page_label["measures"]:
+                reference_y = (
+                    measure["score_staff"]["line_y"]
+                    if args.layout == "score_tab" else measure["tab_staff"]["string_y"]
+                )
                 spacing = (
-                    float(measure["score_staff"]["line_y"][-1])
-                    - float(measure["score_staff"]["line_y"][0])
-                ) / 4.0
+                    float(reference_y[-1]) - float(reference_y[0])
+                ) / max(1, len(reference_y) - 1)
                 for event in measure["events"]:
+                    semantic_event = semantic_events.get(
+                        (int(measure["measure_number"]), int(event["beat_index"])),
+                        event,
+                    )
                     sample_id = (
                         f"{source_id}_p{int(page_label['page_index']):03d}"
                         f"_m{int(measure['measure_number']):03d}_b{int(event['beat_index']):03d}"
@@ -128,27 +159,42 @@ def main() -> None:
                         (database / rhythm_record["label"]).read_text(encoding="utf-8")
                     )
                     tied_notes: list[dict] = []
-                    score_note_count = sum(len(voice["notes"]) for voice in event["voices"])
-                    attacked_note_count = sum(
-                        not note["tied"] for voice in event["voices"] for note in voice["notes"]
+                    score_note_count = sum(
+                        len(voice.get("notes", []))
+                        for voice in semantic_event.get("voices", [])
                     )
-                    for voice in event["voices"]:
-                        for note in voice["notes"]:
+                    attacked_note_count = sum(
+                        not note["tied"]
+                        for voice in semantic_event.get("voices", [])
+                        for note in voice.get("notes", [])
+                    )
+                    for voice in semantic_event.get("voices", []):
+                        for note in voice.get("notes", []):
                             if not note["tied"]:
                                 continue
-                            crop_y = target_y_in_crop(float(note["center_y"]), rhythm_label["transform"])
+                            center_y_page = (
+                                float(note["center_y"])
+                                if args.layout == "score_tab"
+                                else float(measure["tab_staff"]["string_y"][int(note["string"]) - 1])
+                            )
+                            crop_y = target_y_in_crop(center_y_page, rhythm_label["transform"])
                             tied_notes.append(
                                 {
                                     "voice": int(voice["voice_index"]),
                                     "string": int(note["string"]),
                                     "fret": int(note["fret"]),
-                                    "center_y_page": float(note["center_y"]),
+                                    "center_y_page": center_y_page,
                                     "center_y_crop": crop_y,
                                     "y_bin": y_bin(crop_y),
                                 }
                             )
                             if draw is not None:
-                                x, y, width, height = (float(value) for value in note["bbox"])
+                                if args.layout == "score_tab":
+                                    x, y, width, height = (float(value) for value in note["bbox"])
+                                else:
+                                    x = float(event["x"]) - spacing * 0.4
+                                    y = center_y_page - spacing * 0.4
+                                    width = height = spacing * 0.8
                                 draw.rectangle((x, y, x + width, y + height), outline=(220, 0, 190), width=3)
                     unique_bins = sorted({note["y_bin"] for note in tied_notes})
                     record = {
@@ -163,6 +209,7 @@ def main() -> None:
                         "measure_number": int(measure["measure_number"]),
                         "beat_index": int(event["beat_index"]),
                         "event_x_page": float(event["x"]),
+                        "layout": args.layout,
                         "tie_present": bool(tied_notes),
                         "score_note_count": score_note_count,
                         "attacked_note_count": attacked_note_count,
@@ -178,8 +225,8 @@ def main() -> None:
                     counts[split]["tie_unique_y"] += len(unique_bins)
                     if tied_notes and draw is not None:
                         event_x = float(event["x"])
-                        top = float(measure["score_staff"]["line_y"][0]) - 7 * spacing
-                        bottom = float(measure["score_staff"]["line_y"][-1]) + 7 * spacing
+                        top = float(reference_y[0]) - 6 * spacing
+                        bottom = float(reference_y[-1]) + 6 * spacing
                         draw.line((event_x, top, event_x, bottom), fill=(255, 120, 0), width=2)
                         draw.text((event_x + 3, top), f"tie:{len(tied_notes)}", fill=(185, 0, 145))
 
@@ -207,7 +254,7 @@ def main() -> None:
         ),
         "splits": {split: dict(value) for split, value in counts.items()},
         "scope": (
-            "Event-centred real PDF crops; tie-in presence, tied note count and target notehead vertical bins. "
+            f"Event-centred real {args.layout} PDF crops; tie-in presence, tied note count and target vertical bins. "
             "String/fret labels are evaluation-only and are not CNN inputs."
         ),
     }

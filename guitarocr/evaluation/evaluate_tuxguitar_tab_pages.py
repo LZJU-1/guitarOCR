@@ -74,7 +74,10 @@ def match_events(predictions: list[dict], truths: list[dict], tolerance: float) 
     used: set[int] = set()
     true_positive = 0
     for prediction in predictions:
-        signature = tuple(sorted((note["string"], note["fret"]) for note in prediction["notes"]))
+        signature = tuple(sorted(
+            ((note["string"], note["fret"]) for note in prediction["notes"]),
+            key=lambda value: int(value[0]),
+        ))
         options = [
             (abs(prediction["x"] - truth["x"]), truth_index)
             for truth_index, truth in enumerate(truths)

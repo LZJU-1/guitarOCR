@@ -118,6 +118,20 @@ guitarocr-layout D:\pages\page_001.png
 
 该脚本依次生成 `GT.pdf`、执行 `GT.pdf → PRE.gp5 → PRE.pdf`，再把 OCR IR 与 GP7/8 内部 GPIF 语义逐事件比较。
 
+### 跨制谱软件基准（实验）
+
+同一个 GP 文件经不同软件导出后，字体、谱线间距、系统配对和技法字形都会变化；因此不能用 TuxGuitar 测试集代替 Guitar Pro 的真实验收。仓库提供来源隔离的三渲染器基准：
+
+```powershell
+.\scripts\run_cross_renderer_benchmark.ps1 `
+  -SourceCount 12 `
+  -Renderers tuxguitar,musescore,guitarpro
+```
+
+TuxGuitar 与 MuseScore 4 可自动生成 PDF。Guitar Pro 8 需要先由用户完成安装和试用/许可证激活；当前脚本会把待导出的源 GP、版式和目标 PDF 路径写入 `database/cross_renderer_benchmark/manual_export_queue.jsonl`。把 Guitar Pro PDF 放到队列指定位置后重新运行命令，即会自动纳入同一套像素 OCR 评估。基准只从 source-disjoint `test` 划分选曲，每条记录均为 `training_eligible=false`，不能反向加入训练集。
+
+2026-07-14 的首个 3 首曲目、零微调基线表明域差异很大：TuxGuitar 两种版式均恢复 122/122 小节，事件召回 100%，核心事件 exact 约 91.9%–92.0%（主要缺口为双声部同横坐标的音符归属）；MuseScore `tab_only` 的核心事件 exact 只有 0.169%，`score_tab` 3/3 均未通过谱表配对。该结果用于确定适配优先级，不代表训练后的目标性能。
+
 ## 模型和本次指标
 
 默认推理读取 `weights/` 下共 28.29 MiB 的十一个 checkpoint。数字/X 和拍号模型共享，事件/节奏/延音/技法按版式使用独立模型：
@@ -154,7 +168,7 @@ guitarocr-layout D:\pages\page_001.png
 - 纯 TAB 整页延音视觉/语义候选 F1 均为 99.653%，目标弦纵坐标 F1 99.365%；自动续接事件 precision 98.464%、音符 precision 99.281%、真值音符覆盖率 98.106%；
 - 纯 TAB 技法 macro F1 83.181%，其中 slide F1 95.172%；staccato 仍为 0，tapping 与 pick-down 在测试集没有正例。
 
-目标回归曲《若能绽放光芒 Final 教学版》在最多 10 轮 hard-case 修正后达到 168/168 小节、701/701 事件、1,425/1,425 音符、61/61 个 X，以及该曲出现的 palm mute/slide/vibrato、153 个上拨和 389 个下拨全部命中。**该曲被加入过训练和规则修正，因此这是回归验收，不是独立泛化成绩。**
+目标回归曲《若能绽放光芒 Final 教学版》在最多 10 轮 hard-case 修正后达到 168/168 小节、701/701 事件、1,425/1,425 音符、61/61 个 X，以及已纳入现有技法口径的 palm mute/普通 slide/vibrato、153 个上拨和 389 个下拨全部命中。另有 7 个 `X + pick-scrape/slide-like` 复合标记尚未作为独立语义建模；TuxGuitar GP5 模型也不能同时表达 dead/X 与 slide。**该曲被加入过训练和规则修正，因此这是回归验收，不是独立泛化成绩。**
 
 模型文件大小和 SHA-256 见 [weights/README.md](weights/README.md)，完整实验口径见 [docs/EXPERIMENT_RESULTS.md](docs/EXPERIMENT_RESULTS.md)。
 

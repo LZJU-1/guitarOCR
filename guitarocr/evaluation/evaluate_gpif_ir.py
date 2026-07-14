@@ -14,9 +14,12 @@ def _voice(event: dict, voice_index: int = 0) -> dict | None:
     return next((value for value in event.get("voices", []) if int(value.get("voice", -1)) == voice_index), None)
 
 
-def _notes(event: dict) -> Counter:
+def _notes(event: dict, voice_index: int = 0) -> Counter:
     result: Counter = Counter()
     for note in event.get("notes", []):
+        note_voice = note.get("voice")
+        if note_voice is not None and int(note_voice) != voice_index:
+            continue
         fret = note.get("printed_fret", note.get("fret"))
         if isinstance(fret, str):
             fret = fret.upper()
@@ -34,12 +37,15 @@ def _rhythm(event: dict) -> tuple | None:
     )
 
 
-def _effects(event: dict) -> set[str]:
+def _effects(event: dict, voice_index: int = 0) -> set[str]:
     result: set[str] = set()
     for name, value in (event.get("effects") or {}).items():
         if value is True:
             result.add(name)
     for note in event.get("notes", []):
+        note_voice = note.get("voice")
+        if note_voice is not None and int(note_voice) != voice_index:
+            continue
         for name, value in (note.get("effects") or {}).items():
             if value is True and name != "slide_flags":
                 result.add(name)

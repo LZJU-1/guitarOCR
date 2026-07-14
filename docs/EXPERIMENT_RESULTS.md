@@ -381,3 +381,38 @@ pick-down 没有测试正例，不能宣称这些稀有技法已解决。
 
 一键复现入口为 `scripts/run_tab_only_models.ps1`。它构建四类纯 TAB 数据、训练
 四个专用模型，并依次执行整页事件、节奏、指法、合并 IR、延音和拍号测试。
+
+## 2026-07-14：跨制谱软件零微调基准
+
+为了避免把 TuxGuitar 域内指标误当成 Guitar Pro/MuseScore 泛化能力，新建
+`guitarocr.data.build_cross_renderer_benchmark`。它从 source-disjoint `test`
+划分选择同一组 GP3/GP4/GP5 单轨曲目，分别生成 `score_only`、`tab_only` 和
+`score_tab` PDF。所有记录明确写入 `training_eligible=false`，基准样本不得回流
+训练。TuxGuitar 和 MuseScore 4 当前可自动导出；Guitar Pro 在完成安装与激活前
+保留为 manual/GUI export queue。
+
+首轮使用 3 首曲目，共规划 27 个 PDF：TuxGuitar 9 个、MuseScore 9 个已生成，
+Guitar Pro 9 个待导出。OCR 当前只评 `tab_only` 与 `score_tab`，所以每个已安装
+渲染器各评 6 个样本。结果完全在任何跨软件微调之前获得：
+
+| 渲染器/版式 | 样本成功 | 小节数 | 事件 P/R | 核心事件 exact | 节奏 exact | 指法事件 exact |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| TuxGuitar `score_tab` | 3/3 | 122/122 | 99.416% / 100% | 91.856% | 99.832% | 91.940% |
+| TuxGuitar `tab_only` | 3/3 | 122/122 | 99.582% / 100% | 92.024% | 99.664% | 92.107% |
+| MuseScore `tab_only` | 3/3 | 122/133 | 77.516% / 49.790% | 0.169% | 42.159% | 1.012% |
+| MuseScore `score_tab` | 0/3 | 未形成 IR | — | — | — | — |
+
+TuxGuitar 基准中约 8% 的核心事件差距集中在一首双声部曲目：同一时间横坐标同时
+出现两个声部时，部分 TAB 数字没有可靠绑定到具体声部。MuseScore 则首先暴露
+几何域偏移：纯 TAB 谱线/小节被误分组，`score_tab` 的上下谱表配对失败。因此后续
+顺序应是先适配页面几何和谱表配对，再共享数字/X CNN，最后训练声部归属与节奏
+上下文；不能直接把低分归因于数字分类器。
+
+复现命令：
+
+```powershell
+.\scripts\run_cross_renderer_benchmark.ps1 -SourceCount 12
+```
+
+Guitar Pro 导出的 PDF 放入 `manual_export_queue.jsonl` 指定路径后再次执行脚本，
+即可在不改变参考语义和评测口径的前提下补齐第三个视觉域。

@@ -11,6 +11,7 @@ dist/
 # Downloaded third-party runtimes
 tuxguitar/
 tools/
+Guitar Pro 8/
 
 # Original corpora and local acceptance-test material
 music-scores-collection/

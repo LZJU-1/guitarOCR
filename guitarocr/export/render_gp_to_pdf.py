@@ -16,9 +16,15 @@ from guitarocr.tuxguitar_runtime import (
 
 def main() -> None:
     root = PROJECT_ROOT
-    parser = argparse.ArgumentParser(description="Render a GP/GPX/GP3-5 song as TuxGuitar score+TAB PDF.")
+    parser = argparse.ArgumentParser(description="Render a GP/GPX/GP3-5 song as a TuxGuitar PDF.")
     parser.add_argument("input", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument(
+        "--layout",
+        choices=("score_tab", "tab_only", "score_only"),
+        default="score_tab",
+        help="notation layout to render (default: score_tab)",
+    )
     args = parser.parse_args()
     source = JAVA_SOURCE_ROOT / "TuxGuitarPdfRenderer.java"
     classes = root / "database" / "tmp" / "gp_pdf_renderer_classes"
@@ -50,6 +56,7 @@ def main() -> None:
             "TuxGuitarPdfRenderer",
             str(args.input.resolve()),
             str(args.output.resolve()),
+            args.layout,
         ],
         cwd=root,
         capture_output=True,

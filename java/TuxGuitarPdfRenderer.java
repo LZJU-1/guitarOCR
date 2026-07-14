@@ -32,7 +32,7 @@ import app.tuxguitar.song.models.TGTrack;
 import app.tuxguitar.util.TGContext;
 import app.tuxguitar.util.plugin.TGPlugin;
 
-/** Headless score+TAB PDF renderer using the local TuxGuitar installation. */
+/** Headless PDF renderer using the local TuxGuitar installation. */
 public final class TuxGuitarPdfRenderer {
     private final TGContext context = new TGContext();
     private final List<TGPlugin> plugins = new ArrayList<>();
@@ -61,11 +61,13 @@ public final class TuxGuitarPdfRenderer {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 2) {
-            throw new IllegalArgumentException("Usage: TuxGuitarPdfRenderer INPUT.gp OUTPUT.pdf");
+        if (args.length < 2 || args.length > 3) {
+            throw new IllegalArgumentException(
+                    "Usage: TuxGuitarPdfRenderer INPUT.gp OUTPUT.pdf [score_tab|tab_only|score_only]");
         }
         Path input = Path.of(args[0]).toAbsolutePath();
         Path output = Path.of(args[1]).toAbsolutePath();
+        String layout = (args.length == 3 ? args[2] : "score_tab");
         if (!Files.isRegularFile(input)) throw new IllegalArgumentException("Missing input: " + input);
         Files.createDirectories(output.getParent());
         TuxGuitarPdfRenderer renderer = new TuxGuitarPdfRenderer();
@@ -74,8 +76,9 @@ public final class TuxGuitarPdfRenderer {
             TGSong song = renderer.read(input, manager);
             TGTrack track = chooseTrack(song);
             if (track == null) throw new IllegalStateException("No 4-8 string non-percussion track found");
-            renderer.write(song, manager, track, output);
+            renderer.write(song, manager, track, output, layout);
             System.out.println("OUTPUT_PDF=" + output);
+            System.out.println("LAYOUT=" + layout);
             System.out.println("SONG=" + song.getName());
             System.out.println("TRACK_NUMBER=" + track.getNumber());
             System.out.println("TRACK_NAME=" + track.getName());
@@ -127,10 +130,24 @@ public final class TuxGuitarPdfRenderer {
         return fallback;
     }
 
-    private void write(TGSong song, TGSongManager manager, TGTrack track, Path output) throws Exception {
+    private void write(
+            TGSong song,
+            TGSongManager manager,
+            TGTrack track,
+            Path output,
+            String layout) throws Exception {
         TGPrintSettings settings = new TGPrintSettings();
-        settings.setStyle(TGLayout.DISPLAY_COMPACT | TGLayout.DISPLAY_MODE_BLACK_WHITE
-                | TGLayout.DISPLAY_SCORE | TGLayout.DISPLAY_TABLATURE);
+        int style = TGLayout.DISPLAY_COMPACT | TGLayout.DISPLAY_MODE_BLACK_WHITE;
+        if ("tab_only".equals(layout)) {
+            style |= TGLayout.DISPLAY_TABLATURE;
+        } else if ("score_only".equals(layout)) {
+            style |= TGLayout.DISPLAY_SCORE;
+        } else if ("score_tab".equals(layout)) {
+            style |= TGLayout.DISPLAY_SCORE | TGLayout.DISPLAY_TABLATURE;
+        } else {
+            throw new IllegalArgumentException("Unsupported layout: " + layout);
+        }
+        settings.setStyle(style);
         settings.setFromMeasure(1);
         settings.setToMeasure(song.countMeasureHeaders());
         settings.setTrackNumber(track.getNumber());

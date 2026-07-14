@@ -1,6 +1,6 @@
 # GuitarOCR
 
-GuitarOCR 把规则排版的吉他“纯六线 TAB”或“五线谱 + 六线 TAB”PDF 恢复为可编辑的 GP5。项目当前聚焦 TuxGuitar 2.0.1 的印刷样式，不是手写谱或任意制谱软件的通用 OMR。
+GuitarOCR 把规则排版的吉他“纯六线 TAB”或“五线谱 + 六线 TAB”PDF 恢复为可编辑的 GP5。当前主流程适配 TuxGuitar 2.0.1 与官方 Guitar Pro 8.1.2.37 的打印样式，不是手写谱或任意制谱软件的通用 OMR。
 
 ```text
 PDF / 整页图片
@@ -12,7 +12,7 @@ PDF / 整页图片
   → TuxGuitar 回读校验 + 预览 PDF
 ```
 
-仓库包含源码、数据构建/训练/评估脚本和十一个轻量推理模型；不提交原始曲谱、批量渲染图、训练数据库或第三方运行时。
+仓库包含源码、数据构建/训练/评估脚本和十二个轻量推理模型；不提交原始曲谱、批量渲染图、训练数据库或第三方运行时。
 
 ## 当前能做到什么
 
@@ -24,15 +24,15 @@ PDF / 整页图片
 
 主流程的有效输入范围：
 
-- TuxGuitar 2.0.1 导出的规则 `tab_only` 或 `score_tab` 矢量 PDF；CLI 默认自动判别两种版式；
-- 完整页面 `PNG/JPG/JPEG/BMP/TIF/TIFF`，缩放和留白接近 180-DPI TuxGuitar 页面；
+- TuxGuitar 2.0.1 或 Guitar Pro 8.1.2.37 导出的规则 `tab_only` / `score_tab` 矢量 PDF；CLI 默认自动判别两种版式；
+- 完整页面 `PNG/JPG/JPEG/BMP/TIF/TIFF`，缩放和留白接近主流程的 180-DPI 页面；
 - 常规拍号、音符/和弦事件、休止、附点、连音组、TAB 多位数品位和 X；
 - 延音候选与部分和弦延音；dead/muted、vibrato、bend、hammer、slide、ghost、accent、harmonic、grace、palm mute、staccato、let ring、tapping 等技法标签；
 - 单吉他轨、最多两个声部、六弦标准或 IR 中已知的调弦。
 
-尚不承诺：手写谱、拍照/透视、严重扫描噪声、复杂多声部、多轨、歌词/和弦图、反复结构、全部跨系统连线，以及 Guitar Pro、MuseScore、Sibelius 等其他软件的字体和排版。其他软件导出的规则谱需要加入对应真实 PDF 做域适配。
+尚不承诺：手写谱、拍照/透视、严重扫描噪声、复杂多声部、多轨、纯五线谱反推指法、全部反复结构与跨系统连线，以及其他 Guitar Pro 版本、MuseScore、Sibelius 等未验收字体和排版。其他软件或版本导出的规则谱需要加入对应真实 PDF 做域适配。
 
-GP5 也有格式限制：TuxGuitar 的 GP5 模型不能让同一音同时保留 dead/X 和 slide。导出时优先保留页面上可见的 X，冲突会写入 `*.report.json`；完整语义仍保存在 IR，未来可由 GPIF 写入器使用。标题、调号和分页样式也不保证与源 PDF 一致，但音高可用逐音临时升降号表达。
+GP5 也有格式限制：TuxGuitar 的 GP5 模型不能让同一音同时保留 dead/X 与 slide，也不能同时保留 dead/X 与 tie-in。导出时优先保留页面上可见的 X，冲突会写入 `*.report.json`；完整语义仍保存在 IR，未来可由 GPIF 写入器使用。TuxGuitar 的 GP5 写入/回读还可能丢弃部分附加技法位，报告中的 `readback_lossy_semantic_events` 会明确计数。标题、调号和分页样式也不保证与源 PDF 一致，但音高可用逐音临时升降号表达。
 
 ## 已验证环境
 
@@ -41,7 +41,7 @@ GP5 也有格式限制：TuxGuitar 的 GP5 模型不能让同一音同时保留 
 | 操作系统 | Windows 10/11 x86-64 |
 | Python | 3.10–3.12；本次开发/回归为 Python 3.11 |
 | PyTorch | CPU 可推理；NVIDIA CUDA 推荐训练和批量推理 |
-| 制谱运行时 | TuxGuitar 2.0.1 |
+| 制谱运行时 | TuxGuitar 2.0.1；Guitar Pro 8.1.2.37 仅用于对应域的数据生成与验收 |
 | Java | JDK 17+，命令行可运行 `javac` |
 | PDF 渲染 | Poppler，180 DPI 灰度 |
 | 输出 | GP5、Score IR JSON、计划 TSV、回读报告 JSON、预览 PDF |
@@ -82,7 +82,7 @@ guitarocr D:\scores\input.pdf `
 - `document_score_ir.json`：跨页合并后的 Score Event IR；
 - 输出旁的 `.plan.tsv` / `.report.json`：写入计划、假设、格式降级和 TuxGuitar 回读结果。
 
-程序写完 GP5 后会重新读入，并逐声部检查小节数、事件位置、节奏、弦/品、延音及可表示的技法；回读不一致时命令失败。
+程序写完 GP5 后会重新读入，并分层校验：小节数、声部事件位置、节奏、弦/品、延音和 X 属于强制核心层，任一不一致都会让命令失败；附加演奏技法属于可审计语义层，GP5/TuxGuitar 未保留时记录 `readback_fully_matched_events` 与 `readback_lossy_semantic_events`，但不把一份结构正确、可打开的 GP5 误判为导出失败。
 
 ### 整页图片输入
 
@@ -141,11 +141,11 @@ python -m guitarocr.export.render_gp_to_guitarpro_pdf `
 
 适配器默认严格校验 `GuitarPro.exe` 和注入 DLL 的 SHA-256，只接受已验证的 8.1.2.37 配对。安全边界、依赖准备和数据目录见 [docs/GUITAR_PRO_DATASET.md](docs/GUITAR_PRO_DATASET.md)。
 
-2026-07-14 的首个 3 首曲目、零微调基线表明域差异很大：TuxGuitar 两种版式均恢复 122/122 小节，事件召回 100%，核心事件 exact 约 91.9%–92.0%（主要缺口为双声部同横坐标的音符归属）；MuseScore `tab_only` 的核心事件 exact 只有 0.169%，`score_tab` 3/3 均未通过谱表配对。自动 GP8 8.1.2.37 基线中，`tab_only` 三首均能推理，但把 122 个小节切成 188 个，事件 P/R 为 67.306%/73.636%、核心事件 exact 4.105%；`score_tab` 仍为 3/3 谱表配对失败。该结果用于确定适配优先级，不代表训练后的目标性能。
+2026-07-14 的 GP8 source-disjoint 端到端基准只找到 9 首满足“单轨、4–8 弦、GP3/4/5、从未进入训练”的曲目，共 18 份 PDF、431 个小节。域适配后两种版式均恢复 431/431 小节：`tab_only` 事件 P/R 92.949%/99.750%、节奏 exact 93.981%、弦/品 exact 91.379%、核心事件 exact 86.991%；`score_tab` 事件 P/R 95.382%/99.468%、节奏 exact 90.695%、弦/品 exact 87.111%、核心事件 exact 79.063%。最终 9 份 `tab_only` 和 9 份 `score_tab` IR 导出的 GP5 经回读分别保留 2,744/2,744 与 3,364/3,364 个核心声部事件；附加技法位分别有 140 和 744 个事件未被 TuxGuitar GP5 回读完整保留，已单独报告而不计入视觉核心指标。这些是独立曲目结果，不等于“所有 Guitar Pro 排版都已解决”；尤其纯五线谱、复杂结构和若干连接型技法仍在范围外。
 
 ## 模型和本次指标
 
-默认推理读取 `weights/` 下共 28.29 MiB 的十一个 checkpoint。数字/X 和拍号模型共享，事件/节奏/延音/技法按版式使用独立模型：
+默认推理读取 `weights/` 下共 28.81 MiB 的十二个 checkpoint。数字/X 和拍号模型共享，事件/节奏/延音/技法按版式使用独立模型：
 
 | 模型 | 参数量 | 作用 |
 | --- | ---: | --- |
@@ -154,6 +154,7 @@ python -m guitarocr.export.render_gp_to_guitarpro_pdf `
 | `tab_event_locator.pt` | 161,538 | 在纯 TAB 小节中定位全部音符/休止事件横坐标 |
 | `tab_rhythm_context_cnn.pt` | 882,956 | 从纯 TAB 符杆、横梁、休止与附点恢复双声部节奏 |
 | `tab_symbol_detector.pt` | 592,623 | 定位并分类 TAB 数字与 X |
+| `fret_token_cnn.pt` | 133,031 | 在已定位事件的每根弦上分类空白、X 与 0–36 品，负责 Guitar Pro 字体域适配 |
 | `atomic_symbol_cnn.pt` | 218,884 | 拍号数字等原子印刷符号 |
 | `tie_context_cnn.pt` | 888,096 | 延音存在、数量和目标音高关系 |
 | `technique_context_cnn.pt` | 874,989 | 多标签演奏技法上下文 |
@@ -226,7 +227,17 @@ python -m guitarocr.data.augment_gpif_technique_labels <source_id> `
 
 默认配置为 50 首技法覆盖合成曲和最多 80 首真实 GP5，分别生成 `tab / notation / both`，并输出 PDF、PNG、native layout、小节 TNL crop 标签及版面 COCO。训练必须使用 `layout_coco_source_disjoint`；它按曲目把三种版式和全部页面绑定到同一划分，不能使用外部工具原始的 `layout_coco` 随机划分。
 
-这里的自动真值是页面区域和小节语义，不是逐数字/逐音符像素框。因此它已能训练 Guitar Pro 版面检测或小节序列 OCR，但尚不能直接替代现有 TuxGuitar CNN 的细粒度标签；当前发布权重也仍不宣称支持 Guitar Pro 端到端恢复。
+native layout 的自动真值是页面区域和小节语义，不是逐数字/逐音符像素框。仓库会把 native 小节、源 GP 事件和像素检测候选对齐，生成事件条件下的逐弦品位/X、节奏和技法训练裁块；source-disjoint `test` 曲目会被强制排除。
+
+一键构建并微调 Guitar Pro 域模型：
+
+```powershell
+.\scripts\run_guitarpro_domain_adaptation.ps1 `
+  -GuitarProDataset D:\guitarocr_database\guitarpro8_multimode_v1 `
+  -Epochs 12 -Promote
+```
+
+技法发布默认要求验证 precision ≥ 25% 且至少 10 个正例；不达标的类别在 checkpoint 中禁用。`score_tab` hammer 目前也由发布安全门主动关闭，等待相邻事件对模型替代单事件分类器。
 
 ### 4. 训练与评估
 
@@ -251,7 +262,7 @@ Copy-Item D:\guitarocr_database\technique_events\models\technique_context_cnn.pt
 训练建议使用 NVIDIA GPU。只有 validation/test、整页 IR 和重渲染 PDF 都通过后再发布权重：
 
 ```powershell
-.\scripts\promote_models.ps1 -DatabaseRoot D:\guitarocr_database
+.\scripts\promote_models.ps1 -DatabaseRoot D:\guitarocr_database -GuitarProDomain
 guitarocr-check
 ```
 

@@ -24,6 +24,7 @@ database/*
 output/*
 !output/README.md
 tmp/
+reports/
 
 # Local editor/OS files
 .idea/

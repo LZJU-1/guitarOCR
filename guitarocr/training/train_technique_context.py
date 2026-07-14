@@ -31,8 +31,11 @@ class TechniqueDataset(Dataset):
         self.augment = augment
         self.targets: list[list[float]] = []
         for record in self.records:
-            label = json.loads((database / record["label"]).read_text(encoding="utf-8"))
-            primary = label["voices"][0]
+            if "voices" in record:
+                primary = record["voices"][0]
+            else:
+                label = json.loads((database / record["label"]).read_text(encoding="utf-8"))
+                primary = label["voices"][0]
             effects = primary.get("effects", {})
             self.targets.append([float(bool(effects.get(name, False))) for name in TECHNIQUE_CLASSES])
 
@@ -75,21 +78,33 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, thresho
 
 
 @torch.no_grad()
-def tune_thresholds(model: nn.Module, loader: DataLoader, device: torch.device) -> torch.Tensor:
+def tune_thresholds(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    *,
+    minimum_precision: float = 0.0,
+    minimum_support: int = 1,
+) -> torch.Tensor:
     model.eval(); probabilities = []; targets = []
     for images, batch_targets in loader:
         probabilities.append(torch.sigmoid(model(images.to(device))).cpu()); targets.append(batch_targets.bool())
     probs = torch.cat(probabilities); truth = torch.cat(targets)
     thresholds = []
     for index in range(len(TECHNIQUE_CLASSES)):
-        best = (0.0, 0.5)
-        for threshold in torch.arange(0.10, 0.91, 0.05):
+        class_support = int(truth[:, index].sum())
+        if class_support < minimum_support:
+            thresholds.append(1.1)
+            continue
+        best = (-1.0, 1.1)
+        for threshold in torch.arange(0.10, 0.96, 0.05):
             pred = probs[:, index] >= threshold
             tp = int((pred & truth[:, index]).sum()); fp = int((pred & ~truth[:, index]).sum())
             fn = int((~pred & truth[:, index]).sum())
             precision = tp / max(1, tp + fp); recall = tp / max(1, tp + fn)
             f1 = 2 * precision * recall / max(1e-12, precision + recall)
-            if f1 > best[0]: best = (f1, float(threshold))
+            if precision >= minimum_precision and f1 > best[0]:
+                best = (f1, float(threshold))
         thresholds.append(best[1])
     return torch.tensor(thresholds)
 
@@ -101,6 +116,25 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=2e-3)
+    parser.add_argument(
+        "--minimum-validation-precision",
+        type=float,
+        default=0.0,
+        help="Disable a technique class when no validation threshold reaches this precision.",
+    )
+    parser.add_argument(
+        "--minimum-validation-support",
+        type=int,
+        default=1,
+        help="Disable a technique class with fewer positive validation examples.",
+    )
+    parser.add_argument(
+        "--disable-class",
+        action="append",
+        default=[],
+        choices=TECHNIQUE_CLASSES,
+        help="Force a class off in the saved checkpoint (repeatable release-safety gate).",
+    )
     parser.add_argument("--init-checkpoint", type=Path)
     parser.add_argument(
         "--output-name",
@@ -112,7 +146,10 @@ def main() -> None:
     parser.add_argument(
         "--task-root",
         default="rhythm_events",
-        choices=("rhythm_events", "tab_rhythm_events"),
+        choices=(
+            "rhythm_events", "tab_rhythm_events",
+            "gp8_score_rhythm_events", "gp8_tab_rhythm_events",
+        ),
         help="Use score+TAB score-staff crops or pure-TAB event crops.",
     )
     parser.add_argument(
@@ -198,11 +235,17 @@ def main() -> None:
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
-    model_task_root = "technique_events" if args.task_root == "rhythm_events" else "tab_technique_events"
+    model_task_root = {
+        "rhythm_events": "technique_events",
+        "tab_rhythm_events": "tab_technique_events",
+        "gp8_score_rhythm_events": "gp8_score_rhythm_events",
+        "gp8_tab_rhythm_events": "gp8_tab_rhythm_events",
+    }[args.task_root]
     model_root = database / model_task_root / "models"; model_root.mkdir(parents=True, exist_ok=True)
     output_name = args.output_name or (
         "technique_context_cnn.pt"
-        if args.task_root == "rhythm_events" else "tab_technique_context_cnn.pt"
+        if args.task_root in {"rhythm_events", "gp8_score_rhythm_events"}
+        else "tab_technique_context_cnn.pt"
     )
     checkpoint_path = model_root / output_name
     best_score = -1.0; started = time.perf_counter(); history = []
@@ -224,9 +267,17 @@ def main() -> None:
                         model.head[4].weight[row_index].copy_(weight.to(device))
                         model.head[4].bias[row_index].copy_(bias.to(device))
             total_loss += float(loss) * images.shape[0]; seen += images.shape[0]
-        scheduler.step(); thresholds = tune_thresholds(model, validation_loader, device)
+        scheduler.step(); thresholds = tune_thresholds(
+            model,
+            validation_loader,
+            device,
+            minimum_precision=args.minimum_validation_precision,
+            minimum_support=args.minimum_validation_support,
+        )
         for row_index, value in preserved_thresholds.items():
             thresholds[row_index] = value
+        for class_name in args.disable_class:
+            thresholds[TECHNIQUE_CLASSES.index(class_name)] = 1.1
         metrics = evaluate(model, validation_loader, device, thresholds)
         selection_metrics = (
             evaluate(model, selection_loader, device, thresholds)
@@ -244,7 +295,8 @@ def main() -> None:
             best_score = score
             torch.save({"model_state": model.state_dict(), "classes": TECHNIQUE_CLASSES,
                         "thresholds": thresholds.tolist(), "input_size": [INPUT_WIDTH, INPUT_HEIGHT],
-                        "parameter_count": parameter_count(model), "best_epoch": epoch}, checkpoint_path)
+                        "parameter_count": parameter_count(model), "best_epoch": epoch,
+                        "disabled_classes": sorted(set(args.disable_class))}, checkpoint_path)
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model_state"]); thresholds = torch.tensor(checkpoint["thresholds"])
     report = {"elapsed_seconds": time.perf_counter() - started, "best_epoch": checkpoint["best_epoch"],

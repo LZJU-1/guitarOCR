@@ -13,6 +13,7 @@ from guitarocr.data.build_tab_event_locator_dataset import tile_tab_measure
 from guitarocr.data.build_tab_rhythm_dataset import build_tab_event_crop
 from guitarocr.paths import PROJECT_ROOT, WEIGHTS_ROOT
 from guitarocr.pipeline.infer_tuxguitar_score_tab_document import expand_inputs, load_models
+from guitarocr.pipeline.fret_token_classifier import classify_event_frets
 from guitarocr.pipeline.infer_tuxguitar_score_tab_page import (
     classify_rhythm,
     map_event_to_page,
@@ -159,6 +160,10 @@ def main() -> None:
         default=WEIGHTS_ROOT / "tab_symbol_detector.pt",
     )
     parser.add_argument(
+        "--fret-token-model", type=Path,
+        default=WEIGHTS_ROOT / "fret_token_cnn.pt",
+    )
+    parser.add_argument(
         "--atomic-model", type=Path,
         default=WEIGHTS_ROOT / "atomic_symbol_cnn.pt",
     )
@@ -225,6 +230,15 @@ def main() -> None:
             threshold=models["tab_threshold"],
         )
         recover_isolated_tab_events(systems)
+        fret_token_summary = None
+        if models["fret_token"] is not None:
+            fret_token_summary = classify_event_frets(
+                page,
+                systems,
+                models["fret_token"],
+                models["fret_token_classes"],
+                device,
+            )
         page_root = args.output / f"page_{page_index:03d}"
         crop_root = page_root / "crops"
         crop_root.mkdir(parents=True, exist_ok=True)
@@ -265,6 +279,7 @@ def main() -> None:
             "systems": len(systems),
             "measures": len(measures),
             "events": sum(len(measure["events"]) for measure in measures),
+            "fret_token_fusion": fret_token_summary,
             "overlay": str(overlay_path),
             "score_ir": str(page_ir_path),
         })

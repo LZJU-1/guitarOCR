@@ -26,6 +26,8 @@ def reference_from_song_label(label: dict) -> dict:
         onset_by_voice: dict[int, Fraction] = defaultdict(Fraction)
         for beat in measure.get("beats", []):
             pick_stroke = int(beat.get("pick_stroke", 0) or 0)
+            event_voices = []
+            event_notes = []
             for voice in beat.get("voices", []):
                 voice_index = int(voice["index"])
                 duration = voice["duration"]
@@ -45,17 +47,19 @@ def reference_from_song_label(label: dict) -> dict:
                 for note in voice.get("notes", []):
                     effects = dict(note.get("effects") or {})
                     dead = bool(effects.get("dead"))
-                    notes.append({
+                    copied_note = {
                         "string": int(note["string"]),
                         "fret": int(note["fret"]),
                         "printed_fret": "X" if dead else int(note["fret"]),
+                        "voice": voice_index,
                         "tie_in": bool(note.get("tied")),
                         "tie_out": False,
                         "effects": effects,
-                    })
+                    }
+                    notes.append(copied_note)
+                    event_notes.append(copied_note)
                 onset = onset_by_voice[voice_index]
-                events.append({
-                    "order": len(events),
+                event_voices.append({
                     "voice": voice_index,
                     "onset": {"text": f"{onset.numerator}/{onset.denominator}"},
                     "duration_fraction": {
@@ -72,6 +76,15 @@ def reference_from_song_label(label: dict) -> dict:
                     },
                 })
                 onset_by_voice[voice_index] += amount
+            events.append({
+                "order": len(events),
+                "voices": event_voices,
+                "notes": event_notes,
+                "effects": {
+                    "pick_up": pick_stroke == 1,
+                    "pick_down": pick_stroke == -1,
+                },
+            })
         time_signature = measure.get("time_signature") or {}
         measures.append({
             "number": int(measure["number"]),

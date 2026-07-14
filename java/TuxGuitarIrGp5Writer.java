@@ -115,7 +115,8 @@ public final class TuxGuitarIrGp5Writer {
             writeGp5(plugins.context(), song, manager, gp5Path);
             TGSong readback = readGp5(plugins.context(), manager, gp5Path);
             normalizePreciseStarts(readback, manager);
-            int matched = countMatchedEvents(plan, readback);
+            int matched = countMatchedEvents(plan, readback, false, true);
+            int fullyMatched = countMatchedEvents(plan, readback, true, false);
             if (previewPath != null) {
                 Files.createDirectories(previewPath.getParent());
                 writePreviewPdf(plugins.context(), readback, manager, previewPath, previewLayout);
@@ -130,6 +131,9 @@ public final class TuxGuitarIrGp5Writer {
             System.out.println("READBACK_BEATS=" + countNonEmptyBeats(readTrack));
             System.out.println("READBACK_VOICE_EVENTS=" + countNonEmptyVoiceEvents(readTrack));
             System.out.println("READBACK_MATCHED_EVENTS=" + matched + "/" + plan.events().size());
+            System.out.println("READBACK_FULLY_MATCHED_EVENTS="
+                    + fullyMatched + "/" + plan.events().size());
+            System.out.println("READBACK_LOSSY_SEMANTIC_EVENTS=" + (matched - fullyMatched));
             if (previewPath != null) {
                 System.out.println("PREVIEW_PDF=" + previewPath);
                 System.out.println("PREVIEW_LAYOUT=" + previewLayout);
@@ -432,7 +436,8 @@ public final class TuxGuitarIrGp5Writer {
         return count;
     }
 
-    private static int countMatchedEvents(Plan plan, TGSong song) {
+    private static int countMatchedEvents(
+            Plan plan, TGSong song, boolean requireAllSemantics, boolean logUnmatched) {
         TGTrack track = song.getTrack(0);
         int matches = 0;
         for (EventPlan expected : plan.events()) {
@@ -449,14 +454,14 @@ public final class TuxGuitarIrGp5Writer {
                 if (voice.getDuration().isDoubleDotted() != expected.dot().equals("double")) continue;
                 if (voice.getDuration().getDivision().getEnters() != expected.divisionEnters()) continue;
                 if (voice.getDuration().getDivision().getTimes() != expected.divisionTimes()) continue;
-                if (expected.pickStroke() != 0
+                if (requireAllSemantics && expected.pickStroke() != 0
                         && beat.getPickStroke().getDirection() != expected.pickStroke()) continue;
-                if (!notesMatch(expected, voice)) continue;
+                if (!notesMatch(expected, voice, requireAllSemantics)) continue;
                 matches++;
                 matched = true;
                 break;
             }
-            if (!matched) {
+            if (!matched && logUnmatched) {
                 StringBuilder actualAtStart = new StringBuilder();
                 for (TGBeat beat : measure.getBeats()) {
                     if (beat.getStart() != start) continue;
@@ -492,7 +497,8 @@ public final class TuxGuitarIrGp5Writer {
         return matches;
     }
 
-    private static boolean notesMatch(EventPlan expected, TGVoice actual) {
+    private static boolean notesMatch(
+            EventPlan expected, TGVoice actual, boolean requireAllSemantics) {
         if (expected.state().endsWith("rest")) return actual.isRestVoice();
         if (actual.countNotes() != expected.notes().size()) return false;
         for (NotePlan expectedNote : expected.notes()) {
@@ -506,7 +512,10 @@ public final class TuxGuitarIrGp5Writer {
             if (actualNote == null) return false;
             if (actualNote.isTiedNote() != expectedNote.tied()) return false;
             if (!expectedNote.tied() && actualNote.getValue() != expectedNote.fret()) return false;
-            if (!effectsMatch(expectedNote, actualNote)) return false;
+            // A dead note is the printed X token and therefore belongs to the
+            // structural note identity, not the optional technique layer.
+            if (actualNote.getEffect().isDeadNote() != expectedNote.dead()) return false;
+            if (requireAllSemantics && !effectsMatch(expectedNote, actualNote)) return false;
         }
         return true;
     }

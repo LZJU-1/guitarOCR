@@ -20,6 +20,10 @@ from guitarocr.pipeline.infer_tuxguitar_score_tab_page import (
     locate_page_events,
     parse_time_signature,
 )
+from guitarocr.pipeline.fret_token_classifier import (
+    classify_event_frets,
+    load_fret_token_model,
+)
 from guitarocr.pipeline.measure_rhythm_constraints import (
     apply_plausible_rhythm_corrections,
     audit_score_ir,
@@ -96,6 +100,13 @@ def load_models(args: argparse.Namespace, device: torch.device) -> dict:
     tab.load_state_dict(tab_checkpoint["model_state"])
     tab.eval()
 
+    fret_token = None
+    fret_token_classes = None
+    if args.fret_token_model.is_file():
+        fret_token, fret_token_classes, _ = load_fret_token_model(
+            args.fret_token_model, device
+        )
+
     atomic, atomic_classes = load_atomic_model(args.atomic_model, device)
     tie, tie_threshold = load_tie_model(args.tie_model, device)
     technique = None
@@ -137,6 +148,8 @@ def load_models(args: argparse.Namespace, device: torch.device) -> dict:
             if args.tab_threshold is not None
             else float(tab_checkpoint.get("detection_threshold", 0.3))
         ),
+        "fret_token": fret_token,
+        "fret_token_classes": fret_token_classes,
         "atomic": atomic,
         "atomic_classes": atomic_classes,
         "tie": tie,
@@ -174,6 +187,10 @@ def main() -> None:
     parser.add_argument(
         "--tab-model", type=Path,
         default=WEIGHTS_ROOT / "tab_symbol_detector.pt",
+    )
+    parser.add_argument(
+        "--fret-token-model", type=Path,
+        default=WEIGHTS_ROOT / "fret_token_cnn.pt",
     )
     parser.add_argument(
         "--atomic-model", type=Path,
@@ -252,6 +269,15 @@ def main() -> None:
             threshold=models["tab_threshold"],
         )
         recover_isolated_tab_events(systems)
+        fret_token_summary = None
+        if models["fret_token"] is not None:
+            fret_token_summary = classify_event_frets(
+                page,
+                systems,
+                models["fret_token"],
+                models["fret_token_classes"],
+                device,
+            )
         page_root = args.output / f"page_{page_index:03d}"
         crop_root = page_root / "crops"
         crop_root.mkdir(parents=True, exist_ok=True)
@@ -290,6 +316,7 @@ def main() -> None:
                 "systems": len(systems),
                 "measures": len(measures),
                 "events": sum(len(measure["events"]) for measure in measures),
+                "fret_token_fusion": fret_token_summary,
                 "printed_time_signatures": sum(
                     measure["printed_time_signature"] is not None for measure in measures
                 ),

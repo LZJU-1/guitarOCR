@@ -15,14 +15,14 @@ def detect_score_tab_geometry(image: Image.Image) -> list[dict]:
     """
     gray = np.asarray(image.convert("L"), dtype=np.uint8)
     black = gray < 160
-    raw_staffs = detect_tab_geometry(image)
-    # At the fixed TuxGuitar render scale, score spacing is about 17.5 pixels
-    # and TAB spacing is 20 pixels. Standard-score chains may accidentally gain
-    # ledger lines, so identify the clean TAB chains first and recover the five
-    # score lines independently inside the TAB horizontal span.
+    raw_staffs = detect_tab_geometry(image, preserve_cross_staff_barlines=True)
+    # detect_tab_geometry already rejects the much tighter five-line score
+    # staff and returns the following TAB chains. GP8 uses about 16 px TAB
+    # spacing versus TuxGuitar's 20 px, so an absolute spacing threshold would
+    # discard every GP8 system.
     tab_staffs = [
         staff for staff in raw_staffs
-        if staff["string_count"] >= 4 and staff["spacing"] >= 18.75
+        if staff["string_count"] >= 4
     ]
     tab_staffs.sort(key=lambda item: item["string_y"][0])
     systems: list[dict] = []
@@ -40,13 +40,16 @@ def detect_score_tab_geometry(image: Image.Image) -> list[dict]:
             if edges.size:
                 longest_runs[row_index] = int((edges[1::2] - edges[::2]).max(initial=0))
 
-        expected_spacing = float(tab["spacing"]) * 0.875
+        tab_spacing = float(tab["spacing"])
         search_top = max(0, int(previous_tab_bottom + 2.0 * tab["spacing"]))
-        search_bottom = int(tab["string_y"][0] - 2.0 * tab["spacing"] - 4.0 * expected_spacing)
         best: tuple[float, list[float]] | None = None
-        spacing_values = np.arange(expected_spacing - 1.5, expected_spacing + 1.51, 0.25)
         minimum_run = max(25.0, (right - left) * 0.045)
+        # TuxGuitar score/TAB spacing ratio is about 0.875; GP8 is about
+        # 0.65. Search both renderers' range and let five strong parallel
+        # horizontal runs select the actual score staff.
+        spacing_values = np.arange(tab_spacing * 0.55, tab_spacing * 0.96, 0.25)
         for spacing in spacing_values:
+            search_bottom = int(tab["string_y"][0] - 2.0 * tab_spacing - 4.0 * spacing)
             for start in range(search_top, max(search_top, search_bottom) + 1):
                 positions: list[float] = []
                 strengths: list[float] = []

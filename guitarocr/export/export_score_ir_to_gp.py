@@ -385,11 +385,25 @@ def build_plan(
                 note_parts = []
                 for string, note in sorted(notes_by_string.items()):
                     tied = bool(note.get("tie_in"))
-                    tied_notes += int(tied)
                     fret = note.get("fret")
                     dead = bool(note.get("dead") or note.get("muted")) or (
                         isinstance(fret, str) and fret.upper() == "X"
                     )
+                    if dead and tied:
+                        # GP5/TuxGuitar serializes a tied dead note as a normal
+                        # tied fret and silently drops the visible X. Prefer
+                        # the printed dead-note state and retain the richer
+                        # tie+dead combination in IR for a future GPIF writer.
+                        tied = False
+                        issue(
+                            report,
+                            "gp5_dead_tie_conflict",
+                            "GP5 cannot retain tie-in and dead-note on one note; kept the X",
+                            measure=measure_number,
+                            event_order=event_order,
+                            string=string,
+                        )
+                    tied_notes += int(tied)
                     encoded_fret = int(note.get("underlying_fret", 0)) if dead else int(fret)
                     effects = note.get("effects") or {}
                     slide = bool(effects.get("slide", note.get("slide", False)))

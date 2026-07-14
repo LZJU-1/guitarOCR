@@ -44,8 +44,11 @@ class RhythmEventDataset(Dataset):
         self.augment = augment
         self.targets: list[list[dict]] = []
         for record in self.records:
-            label = json.loads((database / record["label"]).read_text(encoding="utf-8"))
-            self.targets.append(label["voices"])
+            if "voices" in record:
+                self.targets.append(record["voices"])
+            else:
+                label = json.loads((database / record["label"]).read_text(encoding="utf-8"))
+                self.targets.append(label["voices"])
 
     def __len__(self) -> int:
         return len(self.records)
@@ -227,7 +230,10 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20260713)
     parser.add_argument("--init-checkpoint", type=Path, help="Optional compatible checkpoint for fine-tuning.")
     parser.add_argument("--task-root", default="rhythm_events",
-                        choices=("rhythm_events", "tab_rhythm_events"),
+                        choices=(
+                            "rhythm_events", "tab_rhythm_events",
+                            "gp8_score_rhythm_events", "gp8_tab_rhythm_events",
+                        ),
                         help="Train score+TAB score-staff crops or pure-TAB rhythm-stem crops.")
     args = parser.parse_args()
 

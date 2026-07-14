@@ -99,6 +99,11 @@ def compact_rhythm_voice(voice: dict) -> dict:
             "dot": voice["dot"]["top"],
             "division": voice["division"]["top"],
         },
+        "vector_overrides": {
+            task: voice.get(task, {}).get("vector_override")
+            for task in ("state", "duration", "dot", "division")
+            if voice.get(task, {}).get("vector_override") is not None
+        },
     }
 
 
@@ -128,8 +133,8 @@ def build_score_ir(systems: list[dict], measure_number_offset: int | None = None
                         "string": int(note["string"]),
                         "fret": note["fret"],
                         "voice": visible_note_voices[0] if len(visible_note_voices) == 1 else None,
-                        "source": "printed_tab",
-                        "tie_in": False,
+                        "source": note.get("source", "printed_tab"),
+                        "tie_in": bool(note.get("tie_in", False)),
                         "tie_out": False,
                         "dead": isinstance(note["fret"], str) and note["fret"].upper() == "X",
                         "effects": {
@@ -160,8 +165,14 @@ def build_score_ir(systems: list[dict], measure_number_offset: int | None = None
                         int(tie_visual["tie_note_count"])
                         if pure_tab else missing_note_count
                     )
+                    vector_missing_note_support = bool(
+                        not pure_tab
+                        and measure.get("pdf_vector_tab_authoritative", False)
+                        and missing_note_count > 0
+                        and float(tie_visual.get("score_note_count_confidence", 0.0)) >= 0.50
+                    )
                     consistent = bool(
-                        tie_visual["visual_positive"]
+                        (tie_visual["visual_positive"] or vector_missing_note_support)
                         and candidate_count > 0
                         and (
                             not pure_tab
@@ -176,13 +187,16 @@ def build_score_ir(systems: list[dict], measure_number_offset: int | None = None
                         ),
                         "attacked_tab_note_count": len(notes),
                         "missing_score_note_count": missing_note_count,
+                        "vector_missing_note_support": vector_missing_note_support,
                         "candidate": consistent,
                         "candidate_tie_count": candidate_count if consistent else 0,
                         "status": (
                             "tab_visual_target_candidate"
                             if consistent and pure_tab else
                             "score_tab_consistent_candidate"
-                            if consistent else
+                            if consistent and tie_visual["visual_positive"] else
+                            "score_tab_vector_missing_note_candidate"
+                            if consistent and vector_missing_note_support else
                             "visual_rejected_no_missing_score_note"
                             if tie_visual["visual_positive"] else
                             "no_visual_tie"
@@ -199,6 +213,12 @@ def build_score_ir(systems: list[dict], measure_number_offset: int | None = None
                         "notes": notes,
                         "technique_prediction": score_event.get("technique_prediction"),
                         "tie_relation": tie_relation,
+                        "pdf_vector_tab_authoritative": bool(
+                            measure.get("pdf_vector_tab_authoritative", False)
+                        ),
+                        "pdf_vector_gp8_signature": bool(
+                            measure.get("pdf_vector_gp8_signature", False)
+                        ),
                     }
                 )
             orphan_tab = [measure["tab_events"][index] for index in sorted(unused_tab)]
@@ -212,7 +232,19 @@ def build_score_ir(systems: list[dict], measure_number_offset: int | None = None
                     "system_index": int(system["system_index"]),
                     "bbox": [float(value) for value in measure["bbox"]],
                     "tab_string_y": [float(value) for value in system["tab_string_y"]],
+                    "score_line_y": [
+                        float(value) for value in system.get("score_line_y", [])
+                    ],
                     "tab_spacing": float(system["tab_spacing"]),
+                    "pdf_vector_tab_authoritative": bool(
+                        measure.get("pdf_vector_tab_authoritative", False)
+                    ),
+                    "pdf_vector_gp8_signature": bool(
+                        measure.get("pdf_vector_gp8_signature", False)
+                    ),
+                    "pdf_vector_tuplet_groups": measure.get(
+                        "pdf_vector_tuplet_groups", []
+                    ),
                     "time_signature": measure.get("time_signature"),
                     "time_signature_source": measure.get("time_signature_source", "unknown"),
                     "printed_time_signature": measure.get("printed_time_signature"),
@@ -253,24 +285,192 @@ def resolve_unambiguous_ties(score_ir: dict) -> dict:
     summary = {
         "visual_candidates": 0,
         "score_tab_consistent_candidates": 0,
+        "score_pitch_ink_candidates": 0,
         "auto_resolved_events": 0,
         "auto_resolved_notes": 0,
         "unresolved_candidates": 0,
     }
     for track in score_ir["tracks"]:
+        tuning = [int(value) for value in (track.get("string_tuning_midi") or [])]
         previous: tuple[dict, dict] | None = None
         last_note_by_string: dict[int, tuple[dict, dict, int, dict]] = {}
+        last_seen_by_string: dict[int, int] = {}
+        last_tied_by_string: dict[
+            int, tuple[tuple[dict, dict, int, dict], int]
+        ] = {}
+        event_serial = 0
+        pitch_class_degree = (0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6)
+
+        def written_note_y(measure: dict, note: dict) -> float | None:
+            score_lines = [float(value) for value in measure.get("score_line_y", [])]
+            string_index = int(note["string"])
+            fret = note.get("fret")
+            if (
+                len(score_lines) < 2
+                or not 1 <= string_index <= len(tuning)
+                or not isinstance(fret, int)
+            ):
+                return None
+            score_spacing = (
+                (score_lines[-1] - score_lines[0]) / max(1, len(score_lines) - 1)
+            )
+            # Guitar sounds an octave below written treble-clef pitch.
+            midi = tuning[string_index - 1] + fret + 12
+            octave = midi // 12 - 1
+            diatonic = octave * 7 + pitch_class_degree[midi % 12]
+            top_line_f5 = 5 * 7 + 3
+            return score_lines[0] + (top_line_f5 - diatonic) * score_spacing / 2.0
+
+        def notehead_ink(relation: dict | None, measure: dict, note: dict) -> float:
+            if relation is None:
+                return 0.0
+            profile = relation.get("score_notehead_ink_profile") or {}
+            values = profile.get("values") or []
+            step = float(profile.get("step_y", 0.0) or 0.0)
+            y = written_note_y(measure, note)
+            if y is None or not values or step <= 0.0:
+                return 0.0
+            index = int(round((y - float(profile["top_y"])) / step))
+            if not 0 <= index < len(values):
+                return 0.0
+            return float(values[index])
 
         def remember_notes(measure: dict, event: dict) -> None:
             for note_index, note in enumerate(event["notes"]):
                 if not note.get("dead"):
-                    last_note_by_string[int(note["string"])] = (
+                    record = (
                         measure, event, note_index, note
                     )
+                    string_index = int(note["string"])
+                    last_note_by_string[string_index] = record
+                    last_seen_by_string[string_index] = event_serial
+                    if note.get("tie_in"):
+                        last_tied_by_string[string_index] = (record, event_serial)
+                    else:
+                        # A fresh attack on the same string terminates any old
+                        # continuation chain; otherwise an unrelated later arc
+                        # can resurrect a stale tied pitch.
+                        last_tied_by_string.pop(string_index, None)
 
         for measure in track["measures"]:
             for event in measure["events"]:
+                event_serial += 1
                 relation = event.get("tie_relation")
+                if event.get("suppressed_as_false_event") or all(
+                    voice.get("state") == "empty"
+                    for voice in event.get("voices", [])
+                ):
+                    if relation is not None:
+                        relation["candidate"] = False
+                        relation["candidate_tie_count"] = 0
+                        relation["status"] = "suppressed_before_tie_resolution"
+                    previous = (measure, event)
+                    continue
+                attacked_strings = {int(note["string"]) for note in event["notes"]}
+                ink_candidates: list[tuple[dict, dict, int, dict]] = []
+                ink_evidence = []
+                if (
+                    relation is not None
+                    and measure.get("pdf_vector_gp8_signature", False)
+                ):
+                    score_lines = [
+                        float(value) for value in measure.get("score_line_y", [])
+                    ]
+                    score_spacing = (
+                        (score_lines[-1] - score_lines[0]) / max(1, len(score_lines) - 1)
+                        if len(score_lines) >= 2 else 0.0
+                    )
+                    attacked_note_y = [
+                        value
+                        for note in event["notes"]
+                        if not note.get("tie_in")
+                        for value in [written_note_y(measure, note)]
+                        if value is not None
+                    ]
+                    for string, (record, seen_serial) in sorted(last_tied_by_string.items()):
+                        if string in attacked_strings:
+                            continue
+                        if event_serial - seen_serial > 2:
+                            continue
+                        ink = notehead_ink(relation, measure, record[3])
+                        candidate_y = written_note_y(measure, record[3])
+                        overlaps_attacked_notehead = bool(
+                            candidate_y is not None
+                            and attacked_note_y
+                            and score_spacing > 0.0
+                            and min(abs(candidate_y - value) for value in attacked_note_y)
+                            <= 0.75 * score_spacing
+                            and int(relation.get("score_note_count", 0)) <= len(attacked_note_y)
+                            and float(relation.get("visual_probability", 0.0)) < 0.50
+                        )
+                        if overlaps_attacked_notehead:
+                            continue
+                        if ink >= 0.28:
+                            ink_candidates.append(record)
+                            ink_evidence.append({
+                                "string": string,
+                                "fret": record[3].get("fret"),
+                                "ink": ink,
+                            })
+                    primary = next(
+                        (
+                            voice for voice in event.get("voices", [])
+                            if int(voice.get("voice", -1)) == 0
+                        ),
+                        None,
+                    )
+                    previous_notes = (
+                        previous[1].get("notes", []) if previous is not None else []
+                    )
+                    allow_fresh_previous = bool(
+                        primary is not None
+                        and primary.get("state") == "note"
+                        and int(relation.get("score_note_count", 0)) > 0
+                        and previous_notes
+                        and not attacked_strings
+                    )
+                    if allow_fresh_previous and previous is not None:
+                        existing_strings = {int(record[3]["string"]) for record in ink_candidates}
+                        available_slots = max(
+                            0,
+                            int(relation.get("score_note_count", 0)) - len(ink_candidates),
+                        )
+                        allow_score_count_override = len(previous_notes) >= 2
+                        for note_index, note in enumerate(previous_notes):
+                            if not allow_score_count_override and available_slots <= 0:
+                                break
+                            string = int(note["string"])
+                            if string in attacked_strings or string in existing_strings:
+                                continue
+                            ink = notehead_ink(relation, measure, note)
+                            if ink < 0.28:
+                                continue
+                            record = (previous[0], previous[1], note_index, note)
+                            ink_candidates.append(record)
+                            available_slots -= 1
+                            ink_evidence.append({
+                                "string": string,
+                                "fret": note.get("fret"),
+                                "ink": ink,
+                                "fresh_from_previous": True,
+                            })
+                    relation["notehead_ink_evidence"] = ink_evidence
+                    if ink_candidates:
+                        relation["candidate"] = True
+                        relation["candidate_tie_count"] = len(ink_candidates)
+                        relation["missing_score_note_count"] = max(
+                            int(relation.get("missing_score_note_count", 0)),
+                            len(ink_candidates),
+                        )
+                        relation["status"] = "score_pitch_ink_candidate"
+                        summary["score_pitch_ink_candidates"] += len(ink_candidates)
+                    elif (
+                        relation.get("vector_missing_note_support")
+                        and not relation.get("visual_positive")
+                    ):
+                        relation["candidate"] = False
+                        relation["candidate_tie_count"] = 0
+                        relation["status"] = "rejected_no_notehead_ink"
                 if relation is not None:
                     summary["visual_candidates"] += int(relation["visual_positive"])
                     summary["score_tab_consistent_candidates"] += int(relation["candidate"])
@@ -279,10 +479,16 @@ def resolve_unambiguous_ties(score_ir: dict) -> dict:
                     previous = (measure, event)
                     continue
                 missing = int(relation["candidate_tie_count"])
-                attacked_strings = {int(note["string"]) for note in event["notes"]}
-                continuation_candidates: list[tuple[dict, dict, int, dict]] = []
-                resolution_method = "adjacent_score_tab_consistency"
+                continuation_candidates: list[tuple[dict, dict, int, dict]] = list(
+                    ink_candidates
+                )
+                resolution_method = (
+                    "score_pitch_ink_consistency"
+                    if continuation_candidates else "adjacent_score_tab_consistency"
+                )
                 if (
+                    not continuation_candidates
+                    and
                     relation.get("target_reference") == "tab_string"
                     and relation.get("target_y_page")
                     and measure.get("tab_string_y")
@@ -306,6 +512,52 @@ def resolve_unambiguous_ties(score_ir: dict) -> dict:
                         if string not in attacked_strings and string in last_note_by_string
                     ]
                     resolution_method = "tab_string_y_sequence_consistency"
+                if (
+                    not continuation_candidates
+                    and
+                    relation.get("target_reference") == "score_notehead"
+                    and relation.get("target_y_page")
+                    and measure.get("score_line_y")
+                    and tuning
+                ):
+                    score_lines = [float(value) for value in measure["score_line_y"]]
+                    score_spacing = (
+                        (score_lines[-1] - score_lines[0]) / max(1, len(score_lines) - 1)
+                    )
+                    available = [
+                        record
+                        for string, record in last_note_by_string.items()
+                        if string not in attacked_strings
+                        and event_serial - last_seen_by_string.get(string, -10_000) <= 8
+                        and written_note_y(measure, record[3]) is not None
+                    ]
+                    selected: list[tuple[dict, dict, int, dict]] = []
+                    distances: list[float] = []
+                    for target_y in relation["target_y_page"]:
+                        candidates = [
+                            (abs(float(written_note_y(measure, record[3])) - float(target_y)), record)
+                            for record in available
+                            if record not in selected
+                        ]
+                        if candidates:
+                            distance, record = min(candidates, key=lambda item: item[0])
+                            selected.append(record)
+                            distances.append(distance)
+                    if (
+                        len(selected) == missing
+                        and distances
+                        and max(distances) <= 1.5 * score_spacing
+                    ):
+                        continuation_candidates = selected
+                        resolution_method = "score_y_pitch_sequence_consistency"
+                sustained_candidates = [
+                    record
+                    for string, (record, seen_serial) in sorted(last_tied_by_string.items())
+                    if string not in attacked_strings and event_serial - seen_serial <= 2
+                ]
+                if not continuation_candidates and len(sustained_candidates) == missing:
+                    continuation_candidates = sustained_candidates
+                    resolution_method = "recent_tie_chain_consistency"
                 if previous is not None:
                     adjacent_candidates = [
                         (previous[0], previous[1], note_index, note)

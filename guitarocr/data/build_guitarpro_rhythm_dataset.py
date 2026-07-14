@@ -10,7 +10,7 @@ from PIL import Image
 import torch
 
 from guitarocr.data.build_fret_token_dataset import (
-    align_events,
+    align_events_with_printed_tab_anchors,
     label_events,
     native_measure_numbers,
     read_jsonl,
@@ -22,6 +22,10 @@ from guitarocr.models.score_event_locator_model import ScoreEventLocator
 from guitarocr.paths import DATABASE_ROOT, WEIGHTS_ROOT
 from guitarocr.pipeline.infer_tuxguitar_score_tab_page import locate_page_events
 from guitarocr.pipeline.infer_tuxguitar_tab_document import locate_tab_page_events
+from guitarocr.pipeline.pdf_vector_tab import (
+    apply_pdf_vector_tab_glyphs,
+    extract_pdf_tab_glyphs,
+)
 
 
 PAGE_RE = re.compile(r"_page(\d+)\.png$")
@@ -61,6 +65,11 @@ def main() -> None:
     parser.add_argument("--database", type=Path, default=DATABASE_ROOT)
     parser.add_argument("--gp8-root", type=Path)
     parser.add_argument("--modes", default="tab,both")
+    parser.add_argument(
+        "--include-unanchored",
+        action="store_true",
+        help="also keep normalized-position fallback alignments (disabled by default)",
+    )
     args = parser.parse_args()
     database = args.database.resolve()
     gp8_root = (args.gp8_root or database / "guitarpro8_multimode_v1").resolve()
@@ -143,6 +152,15 @@ def main() -> None:
                     float(score_checkpoint.get("detection_threshold", 0.3)),
                 )
             )
+            source_pdf = gp8_root / mode / "pdf" / f"{source_group}.pdf"
+            vector_summary = None
+            if source_pdf.is_file():
+                vector_summary = apply_pdf_vector_tab_glyphs(
+                    systems,
+                    extract_pdf_tab_glyphs(source_pdf, page_index + 1, page.size),
+                )
+                counts[mode]["vector_pdf_pages"] += 1
+                counts[mode]["vector_pdf_tokens"] += int(vector_summary["tokens"])
             detected_measures = [measure for system in systems for measure in system["measures"]]
             if len(detected_measures) != len(measure_numbers):
                 counts[mode]["geometry_mismatch_pages"] += 1
@@ -155,9 +173,23 @@ def main() -> None:
                     continue
                 system = next(item for item in systems if measure in item["measures"])
                 semantic_events = semantic_measures[measure_number - 1]
-                for expected_index, detected_index, delta in align_events(
-                    semantic_events, measure["events"]
+                aligned, alignment_summary = align_events_with_printed_tab_anchors(
+                    semantic_events,
+                    measure["events"],
+                    measure.get("vector_tab_events", []),
+                )
+                counts[mode][f"alignment:{alignment_summary['method']}"] += 1
+                counts[mode]["matched_attack_anchors"] += int(
+                    alignment_summary["matched_attack_anchors"]
+                )
+                if (
+                    alignment_summary["method"] == "normalized_position_fallback"
+                    and not args.include_unanchored
                 ):
+                    counts[mode]["excluded_unanchored_measures"] += 1
+                    counts[mode]["excluded_unanchored_events"] += len(semantic_events)
+                    continue
+                for expected_index, detected_index, delta in aligned:
                     expected = semantic_events[expected_index]
                     event = measure["events"][detected_index]
                     if float(event.get("locator_confidence", 1.0)) < 0.18:
@@ -188,7 +220,20 @@ def main() -> None:
                         "renderer_domain": "guitarpro8",
                         "image": output_path.relative_to(database).as_posix(),
                         "voices": voices,
+                        "tie_present": bool(expected.get("tied_notes")),
+                        "tied_note_count": len(expected.get("tied_notes", [])),
+                        "score_note_count": int(
+                            expected.get("score_note_count", len(expected.get("notes", {})))
+                        ),
+                        "attacked_note_count": int(
+                            expected.get("attacked_note_count", len(expected.get("printed_notes", {})))
+                        ),
+                        "tied_notes": expected.get("tied_notes", []),
                         "alignment_delta": delta,
+                        "alignment_method": alignment_summary["method"],
+                        "alignment_attack_anchors": int(
+                            alignment_summary["matched_attack_anchors"]
+                        ),
                         "transform": transform,
                     }
                     rows[mode][split].append(row)

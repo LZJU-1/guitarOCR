@@ -127,6 +127,10 @@ def tnl_events(path: Path) -> tuple[int, list[list[dict]]]:
             events.append({
                 "onset": onset,
                 "notes": notes,
+                "printed_notes": dict(notes),
+                "tied_notes": [],
+                "score_note_count": len(notes),
+                "attacked_note_count": len(notes),
                 "voices": [voice_zero, voice_one],
             })
             onset += duration
@@ -142,6 +146,8 @@ def label_events(path: Path) -> tuple[int, list[list[dict]]]:
         beats = []
         for beat in measure.get("beats", []):
             notes = {}
+            printed_notes = {}
+            tied_notes = []
             voices_by_index = {int(voice["index"]): voice for voice in beat.get("voices", [])}
             rhythm_voices = []
             for voice_index in range(2):
@@ -178,10 +184,20 @@ def label_events(path: Path) -> tuple[int, list[list[dict]]]:
             for voice in beat.get("voices", []):
                 for note in voice.get("notes", []):
                     effects = note.get("effects") or {}
-                    notes[int(note["string"])] = "X" if effects.get("dead") else int(note["fret"])
+                    string_index = int(note["string"])
+                    value = "X" if effects.get("dead") else int(note["fret"])
+                    notes[string_index] = value
+                    if bool(note.get("tied", False)):
+                        tied_notes.append({"string": string_index, "fret": value})
+                    else:
+                        printed_notes[string_index] = value
             beats.append({
                 "onset": Fraction(int(beat["precise_start"]), 1),
                 "notes": notes,
+                "printed_notes": printed_notes,
+                "tied_notes": tied_notes,
+                "score_note_count": len(notes),
+                "attacked_note_count": len(printed_notes),
                 "voices": rhythm_voices,
             })
         if beats:
@@ -247,6 +263,108 @@ def align_events(expected: list[dict], detected: list[dict]) -> list[tuple[int, 
         else:
             break
     return list(reversed(pairs))
+
+
+def _note_key(notes: dict) -> tuple[tuple[int, str], ...]:
+    return tuple(sorted((int(string), str(fret).upper()) for string, fret in notes.items()))
+
+
+def align_events_with_printed_tab_anchors(
+    expected: list[dict],
+    detected: list[dict],
+    vector_events: list[dict],
+) -> tuple[list[tuple[int, int, float]], dict]:
+    """Align semantic beats to detected x positions using exact PDF TAB anchors.
+
+    Attack fret tokens are an ordered fingerprint of a measure.  When the
+    source semantics and vector-PDF fingerprints agree, their event indices are
+    fixed first; only rests and unprinted tie continuations between those
+    anchors need positional alignment. This avoids assigning correct rhythm
+    labels to the wrong GP8 crop merely because event counts happen to match.
+    """
+    expected_anchors = [
+        (index, _note_key(event.get("printed_notes", event.get("notes", {}))))
+        for index, event in enumerate(expected)
+        if event.get("printed_notes", event.get("notes", {}))
+    ]
+    vector_by_x = {
+        round(float(event["x"]), 4): _note_key({
+            int(note["string"]): note["fret"]
+            for note in event.get("notes", [])
+            if not bool(note.get("tie_in", False))
+        })
+        for event in vector_events
+    }
+    detected_anchors = [
+        (index, vector_by_x.get(round(float(event["x"]), 4), ()))
+        for index, event in enumerate(detected)
+        if vector_by_x.get(round(float(event["x"]), 4), ())
+    ]
+    expected_fingerprint = [key for _index, key in expected_anchors]
+    detected_fingerprint = [key for _index, key in detected_anchors]
+    if not expected_anchors and len(expected) == len(detected):
+        pairs = [(index, index, 0.0) for index in range(len(expected))]
+        return pairs, {
+            "method": "event_count_exact_no_attacks",
+            "expected_attack_anchors": 0,
+            "detected_attack_anchors": len(detected_anchors),
+            "matched_attack_anchors": 0,
+            "aligned_events": len(pairs),
+        }
+    if expected_fingerprint != detected_fingerprint:
+        pairs = align_events(expected, detected)
+        return pairs, {
+            "method": "normalized_position_fallback",
+            "expected_attack_anchors": len(expected_anchors),
+            "detected_attack_anchors": len(detected_anchors),
+            "matched_attack_anchors": 0,
+            "aligned_events": len(pairs),
+        }
+
+    anchors = [
+        (expected_index, detected_index)
+        for (expected_index, _), (detected_index, _) in zip(
+            expected_anchors, detected_anchors
+        )
+    ]
+    pairs: list[tuple[int, int, float]] = [
+        (expected_index, detected_index, 0.0)
+        for expected_index, detected_index in anchors
+    ]
+    boundaries = [(-1, -1), *anchors, (len(expected), len(detected))]
+    for (expected_left, detected_left), (expected_right, detected_right) in zip(
+        boundaries, boundaries[1:]
+    ):
+        expected_indices = list(range(expected_left + 1, expected_right))
+        detected_indices = list(range(detected_left + 1, detected_right))
+        if not expected_indices or not detected_indices:
+            continue
+        if len(expected_indices) == len(detected_indices):
+            pairs.extend(
+                (expected_index, detected_index, 0.0)
+                for expected_index, detected_index in zip(expected_indices, detected_indices)
+            )
+            continue
+        local_pairs = align_events(
+            [expected[index] for index in expected_indices],
+            [detected[index] for index in detected_indices],
+        )
+        pairs.extend(
+            (
+                expected_indices[expected_index],
+                detected_indices[detected_index],
+                delta,
+            )
+            for expected_index, detected_index, delta in local_pairs
+        )
+    pairs.sort()
+    return pairs, {
+        "method": "pdf_vector_tab_anchors",
+        "expected_attack_anchors": len(expected_anchors),
+        "detected_attack_anchors": len(detected_anchors),
+        "matched_attack_anchors": len(anchors),
+        "aligned_events": len(pairs),
+    }
 
 
 def native_measure_numbers(layout_path: Path, page_index: int) -> list[int]:

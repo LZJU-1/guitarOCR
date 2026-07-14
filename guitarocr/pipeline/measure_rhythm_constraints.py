@@ -189,7 +189,10 @@ def top_values(items: list[dict], limit: int, minimum: float = 0.005) -> list[tu
 def event_options(event: dict, voice: dict) -> list[dict]:
     duration_values = top_values(voice["candidates"]["duration"], 3)
     dot_values = top_values(voice["candidates"]["dot"], 2)
-    division_values = top_values(voice["candidates"]["division"], 3)
+    if voice.get("vector_overrides", {}).get("division"):
+        division_values = [(voice["division"], 1.0)]
+    else:
+        division_values = top_values(voice["candidates"]["division"], 3)
     options_by_fraction: dict[Fraction, dict] = {}
     for (duration, duration_probability) in duration_values:
         for dot, dot_probability in dot_values:
@@ -223,7 +226,13 @@ def event_options(event: dict, voice: dict) -> list[dict]:
         "remove_event": False,
     }
     if (
-        float(event["locator_confidence"]) < 0.60
+        (
+            float(event["locator_confidence"]) < 0.60
+            or (
+                event.get("pdf_vector_gp8_signature")
+                and float(event["locator_confidence"]) < 0.75
+            )
+        )
         and event.get("tab_match") != "matched"
     ):
         removal_probability = max(0.01, 1.0 - float(event["locator_confidence"]))
@@ -414,7 +423,40 @@ def apply_plausible_rhythm_corrections(score_ir: dict) -> dict:
                 and modifications[0].get("to") is not None
                 and float(modifications[0].get("candidate_probability", 0.0)) >= 0.005
             )
-            if not proposal.get("plausible") and not closure_override:
+            vector_duplicate_override = False
+            if (
+                measure.get("pdf_vector_gp8_signature")
+                and primary.get("status") in {"underfilled", "overfilled"}
+                and proposal.get("fills_measure")
+                and len(modifications) == 2
+            ):
+                removals = [item for item in modifications if item.get("to") is None]
+                changes = [item for item in modifications if item.get("to") is not None]
+                if len(removals) == 1 and len(changes) == 1:
+                    removal_event = measure["events"][int(removals[0]["event_index"])]
+                    vector_duplicate_override = bool(
+                        removal_event.get("tab_match") != "matched"
+                        and float(removal_event.get("locator_confidence", 1.0)) < 0.40
+                        and float(changes[0].get("candidate_probability", 0.0)) >= 0.05
+                    )
+            vector_two_change_closure = bool(
+                measure.get("pdf_vector_gp8_signature")
+                and primary.get("status") in {"underfilled", "overfilled"}
+                and proposal.get("fills_measure")
+                and len(modifications) == 2
+                and all(item.get("to") is not None for item in modifications)
+                and all(
+                    float(item.get("candidate_probability", 0.0)) >= 0.02
+                    for item in modifications
+                )
+                and float(proposal.get("relative_probability_vs_current", 0.0)) >= 0.01
+            )
+            if (
+                not proposal.get("plausible")
+                and not closure_override
+                and not vector_duplicate_override
+                and not vector_two_change_closure
+            ):
                 continue
             changed = False
             for modification in modifications:
@@ -434,6 +476,18 @@ def apply_plausible_rhythm_corrections(score_ir: dict) -> dict:
                         "state": "empty", "duration_value": None,
                         "dot": None, "division": None,
                     })
+                    if all(
+                        item.get("state") == "empty"
+                        for item in event.get("voices", [])
+                    ):
+                        event["notes"] = []
+                        event["suppressed_as_false_event"] = True
+                        if event.get("tie_relation") is not None:
+                            event["tie_relation"]["candidate"] = False
+                            event["tie_relation"]["candidate_tie_count"] = 0
+                            event["tie_relation"]["status"] = (
+                                "suppressed_by_measure_rhythm_constraint"
+                            )
                     summary["events_removed"] += 1
                 else:
                     voice.update({
@@ -444,11 +498,252 @@ def apply_plausible_rhythm_corrections(score_ir: dict) -> dict:
                 event["rhythm_constraint_correction"] = {
                     **modification,
                     "relative_probability_vs_current": proposal["relative_probability_vs_current"],
-                    "selection": "plausible" if proposal.get("plausible") else "unique_measure_closure",
+                    "selection": (
+                        "plausible" if proposal.get("plausible") else
+                        "vector_duplicate_measure_closure" if vector_duplicate_override else
+                        "vector_two_change_measure_closure" if vector_two_change_closure else
+                        "unique_measure_closure"
+                    ),
                 }
                 summary["events_changed"] += 1
                 changed = True
             summary["measures_changed"] += int(changed)
     audit_score_ir(score_ir)
     score_ir["rhythm_constraint_corrections"] = summary
+    return summary
+
+
+def fill_single_event_vector_measures(score_ir: dict) -> dict:
+    """Fill a measure represented by one authoritative printed attack."""
+    mapping = {
+        Fraction(1, 1): (1, "none"),
+        Fraction(3, 4): (2, "single"),
+        Fraction(1, 2): (2, "none"),
+        Fraction(3, 8): (4, "single"),
+        Fraction(1, 4): (4, "none"),
+        Fraction(3, 16): (8, "single"),
+        Fraction(1, 8): (8, "none"),
+    }
+    summary = {"measures_changed": 0, "events_changed": 0}
+    for track in score_ir.get("tracks", []):
+        for measure in track.get("measures", []):
+            if not measure.get("pdf_vector_gp8_signature"):
+                continue
+            signature = measure.get("time_signature")
+            if not signature:
+                continue
+            active = []
+            for event in measure.get("events", []):
+                voice = next(
+                    (item for item in event.get("voices", []) if int(item.get("voice", -1)) == 0),
+                    None,
+                )
+                if voice is not None and voice.get("state") != "empty":
+                    active.append((event, voice))
+            if len(active) != 1:
+                continue
+            event, voice = active[0]
+            if event.get("tab_match") != "matched" or voice.get("state") != "note":
+                continue
+            capacity = Fraction(int(signature[0]), int(signature[1]))
+            resolved = mapping.get(capacity)
+            if resolved is None:
+                continue
+            duration_value, dot = resolved
+            current = duration_fraction(
+                int(voice["duration_value"]), str(voice["dot"]), str(voice["division"])
+            )
+            if current >= capacity:
+                continue
+            voice.update({
+                "duration_value": duration_value,
+                "dot": dot,
+                "division": "1:1",
+            })
+            event["rhythm_constraint_correction"] = {
+                "from_fraction": fraction_json(current),
+                "to_fraction": fraction_json(capacity),
+                "selection": "single_authoritative_attack_measure_fill",
+            }
+            summary["measures_changed"] += 1
+            summary["events_changed"] += 1
+    audit_score_ir(score_ir)
+    score_ir["single_event_vector_measure_fill"] = summary
+    return summary
+
+
+def _remap_tie_edges_after_pruning(
+    score_ir: dict,
+    order_maps: dict[tuple[int | None, int | None], dict[int, int]],
+) -> None:
+    """Keep relation endpoints aligned when post-tie pruning renumbers events."""
+    if "tie_edges" not in score_ir:
+        return
+    retained_edges = []
+    for edge in score_ir.get("tie_edges", []):
+        updated = dict(edge)
+        valid = True
+        for endpoint_name in ("from", "to"):
+            endpoint = dict(edge[endpoint_name])
+            key = (endpoint.get("measure"), endpoint.get("page_measure_index"))
+            mapping = order_maps.get(key)
+            old_order = int(endpoint["event_order"])
+            if mapping is not None:
+                if old_order not in mapping:
+                    valid = False
+                    break
+                endpoint["event_order"] = mapping[old_order]
+            updated[endpoint_name] = endpoint
+        if valid:
+            retained_edges.append(updated)
+    score_ir["tie_edges"] = retained_edges
+
+
+def prune_empty_ir_events(score_ir: dict) -> dict:
+    """Remove locator proposals that carry neither rhythm nor pitch."""
+    summary = {"removed": 0}
+    order_maps = {}
+    for track in score_ir.get("tracks", []):
+        for measure in track.get("measures", []):
+            retained = []
+            order_map = {}
+            for event in measure.get("events", []):
+                old_order = int(event.get("order", len(retained)))
+                empty = all(
+                    voice.get("state") == "empty"
+                    for voice in event.get("voices", [])
+                )
+                if empty and not event.get("notes"):
+                    summary["removed"] += 1
+                    continue
+                order_map[old_order] = len(retained)
+                retained.append(event)
+            for order, event in enumerate(retained):
+                event["order"] = order
+            measure["events"] = retained
+            order_maps[(measure.get("number"), measure.get("page_measure_index"))] = order_map
+    _remap_tie_edges_after_pruning(score_ir, order_maps)
+    score_ir["empty_event_pruning"] = summary
+    return summary
+
+
+def prune_nearby_gp8_duplicate_score_events(score_ir: dict) -> dict:
+    """Remove split score-head proposals immediately beside a vector attack.
+
+    GP8 may draw chord noteheads on opposite sides of a stem.  The score
+    locator can interpret the left-hand head and the TAB-aligned chord as two
+    consecutive events.  After tie resolution we reject the left proposal
+    only when it is within one TAB-line spacing of an authoritative attack and
+    either conflicts on the same string or lacks strong tie evidence.  A
+    high-confidence continuation on disjoint strings is retained.
+    """
+    summary = {"removed": 0, "measures_changed": 0}
+    order_maps = {}
+    for track in score_ir.get("tracks", []):
+        for measure in track.get("measures", []):
+            events = measure.get("events", [])
+            if not (
+                measure.get("pdf_vector_gp8_signature")
+                and measure.get("pdf_vector_tab_authoritative")
+                and events
+            ):
+                continue
+            spacing = float(measure.get("tab_spacing") or 0.0)
+            retained = []
+            order_map = {}
+            changed = False
+            for index, event in enumerate(events):
+                old_order = int(event.get("order", index))
+                next_event = events[index + 1] if index + 1 < len(events) else None
+                notes = event.get("notes", [])
+                note_sources = {note.get("source") for note in notes}
+                continuation_only = bool(
+                    not notes or note_sources <= {"tie_continuation"}
+                )
+                close_to_attack = bool(
+                    spacing > 0.0
+                    and next_event is not None
+                    and next_event.get("tab_match") == "matched"
+                    and 0.0 < float(next_event["x"]) - float(event["x"]) <= 0.90 * spacing
+                )
+                relation = event.get("tie_relation") or {}
+                candidate_strings = {int(note["string"]) for note in notes}
+                next_strings = {
+                    int(note["string"]) for note in (next_event or {}).get("notes", [])
+                }
+                string_conflict = bool(candidate_strings & next_strings)
+                weak_tie = float(relation.get("visual_probability", 0.0)) < 0.50
+                duplicate = bool(
+                    event.get("tab_match") != "matched"
+                    and continuation_only
+                    and close_to_attack
+                    and (not notes or string_conflict or weak_tie)
+                )
+                if duplicate:
+                    summary["removed"] += 1
+                    changed = True
+                    continue
+                order_map[old_order] = len(retained)
+                retained.append(event)
+            if changed:
+                summary["measures_changed"] += 1
+            for order, event in enumerate(retained):
+                event["order"] = order
+            measure["events"] = retained
+            order_maps[(measure.get("number"), measure.get("page_measure_index"))] = order_map
+    _remap_tie_edges_after_pruning(score_ir, order_maps)
+    score_ir["nearby_gp8_duplicate_score_event_pruning"] = summary
+    return summary
+
+
+def prune_unpitched_gp8_note_events(score_ir: dict) -> dict:
+    """Drop GP8 score proposals that cannot represent a musical event.
+
+    Official GP8 score+TAB PDFs sometimes place a stem-side notehead far
+    enough from its TAB attack for the score locator to emit a second event.
+    We cannot reject that proposal before tie resolution because a real tied
+    continuation also has no printed TAB number.  After tie resolution,
+    however, an event whose active voices are all ``note`` and which still has
+    no note is neither a rest nor an exportable continuation.  Restricting the
+    cleanup to authoritative GP8 vector PDFs keeps the raster and TuxGuitar
+    paths unchanged.
+    """
+    summary = {"removed": 0, "measures_changed": 0}
+    order_maps = {}
+    for track in score_ir.get("tracks", []):
+        for measure in track.get("measures", []):
+            if not (
+                measure.get("pdf_vector_gp8_signature")
+                and measure.get("pdf_vector_tab_authoritative")
+            ):
+                continue
+            retained = []
+            order_map = {}
+            changed = False
+            for event in measure.get("events", []):
+                old_order = int(event.get("order", len(retained)))
+                active_voices = [
+                    voice for voice in event.get("voices", [])
+                    if voice.get("state") != "empty"
+                ]
+                unpitched_note = bool(
+                    active_voices
+                    and all(voice.get("state") == "note" for voice in active_voices)
+                    and not event.get("notes")
+                    and event.get("tab_match") != "matched"
+                )
+                if unpitched_note:
+                    summary["removed"] += 1
+                    changed = True
+                    continue
+                order_map[old_order] = len(retained)
+                retained.append(event)
+            if changed:
+                summary["measures_changed"] += 1
+            for order, event in enumerate(retained):
+                event["order"] = order
+            measure["events"] = retained
+            order_maps[(measure.get("number"), measure.get("page_measure_index"))] = order_map
+    _remap_tie_edges_after_pruning(score_ir, order_maps)
+    score_ir["unpitched_gp8_note_event_pruning"] = summary
     return summary

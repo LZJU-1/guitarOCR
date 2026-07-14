@@ -68,16 +68,21 @@ def classify_event_frets(
 
     summary = {
         "events": 0,
+        "vector_text_notes": 0,
         "classifier_notes": 0,
         "detector_fallback_notes": 0,
         "suppressed_detector_notes": 0,
+        "suppressed_raster_notes_on_vector_pdf": 0,
         "orphan_detector_events": 0,
     }
     for system in systems:
         match_radius = max(6.0, float(system["tab_spacing"]) * 0.60)
         for measure in system["measures"]:
+            vector_authoritative = bool(measure.get("pdf_vector_tab_authoritative", False))
             detector_events = list(measure.get("tab_events", []))
+            vector_events = list(measure.get("vector_tab_events", []))
             used_detector: set[int] = set()
+            used_vector: set[int] = set()
             fused_events = []
             for event in measure["events"]:
                 summary["events"] += 1
@@ -92,9 +97,24 @@ def classify_event_frets(
                     if delta <= match_radius:
                         nearest = item
                         used_detector.add(index)
+                nearest_vector = None
+                vector_candidates = [
+                    (abs(float(item["x"]) - float(event["x"])), index, item)
+                    for index, item in enumerate(vector_events)
+                    if index not in used_vector
+                ]
+                if vector_candidates:
+                    delta, index, item = min(vector_candidates)
+                    if delta <= match_radius:
+                        nearest_vector = item
+                        used_vector.add(index)
                 detector_by_string = {
                     int(note["string"]): note["fret"]
                     for note in (nearest or {}).get("notes", [])
+                }
+                vector_by_string = {
+                    int(note["string"]): note
+                    for note in (nearest_vector or {}).get("notes", [])
                 }
                 notes = []
                 for prediction in event["fret_token_predictions"]:
@@ -104,16 +124,40 @@ def classify_event_frets(
                     blank_probability = float(prediction["blank_probability"])
                     value = None
                     source = None
-                    if class_name != "blank" and probability >= nonblank_threshold:
+                    tie_in = False
+                    printed_text = None
+                    bbox = None
+                    if string_index in vector_by_string:
+                        vector_note = vector_by_string[string_index]
+                        value = vector_note["fret"]
+                        source = "pdf_vector_text"
+                        probability = 1.0
+                        tie_in = bool(vector_note.get("tie_in", False))
+                        printed_text = vector_note.get("printed_text")
+                        bbox = vector_note.get("bbox")
+                        summary["vector_text_notes"] += 1
+                    elif (
+                        not vector_authoritative
+                        and class_name != "blank"
+                        and probability >= nonblank_threshold
+                    ):
                         value = "X" if class_name == "X" else int(class_name)
                         source = "fret_token_cnn"
                         summary["classifier_notes"] += 1
-                    elif string_index in detector_by_string and blank_probability < blank_suppression_threshold:
+                    elif (
+                        not vector_authoritative
+                        and string_index in detector_by_string
+                        and blank_probability < blank_suppression_threshold
+                    ):
                         value = detector_by_string[string_index]
                         source = "tab_symbol_detector_fallback"
                         summary["detector_fallback_notes"] += 1
-                    elif string_index in detector_by_string:
+                    elif not vector_authoritative and string_index in detector_by_string:
                         summary["suppressed_detector_notes"] += 1
+                    elif vector_authoritative and (
+                        class_name != "blank" or string_index in detector_by_string
+                    ):
+                        summary["suppressed_raster_notes_on_vector_pdf"] += 1
                     if value is not None:
                         notes.append(
                             {
@@ -121,13 +165,19 @@ def classify_event_frets(
                                 "fret": value,
                                 "source": source,
                                 "confidence": probability,
+                                "tie_in": tie_in,
+                                "printed_text": printed_text,
+                                "bbox": bbox,
                             }
                         )
                 if notes:
                     fused_events.append({"x": float(event["x"]), "notes": notes})
             for index, detector_event in enumerate(detector_events):
-                if index not in used_detector:
+                if index not in used_detector and not vector_authoritative:
                     fused_events.append(detector_event)
                     summary["orphan_detector_events"] += 1
+            for index, vector_event in enumerate(vector_events):
+                if index not in used_vector:
+                    fused_events.append(vector_event)
             measure["tab_events"] = sorted(fused_events, key=lambda item: float(item["x"]))
     return summary

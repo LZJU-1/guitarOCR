@@ -1,5 +1,7 @@
 # GuitarOCR
 
+> Guitar Pro 8 的闭源数据构建、六条迭代工作流、验收门槛和最新配对结果见 [docs/GUITAR_PRO_PARITY_PLAN.md](docs/GUITAR_PRO_PARITY_PLAN.md)。
+
 GuitarOCR 把规则排版的吉他“纯六线 TAB”或“五线谱 + 六线 TAB”PDF 恢复为可编辑的 GP5。当前主流程适配 TuxGuitar 2.0.1 与官方 Guitar Pro 8.1.2.37 的打印样式，不是手写谱或任意制谱软件的通用 OMR。
 
 ```text
@@ -142,6 +144,14 @@ python -m guitarocr.export.render_gp_to_guitarpro_pdf `
 适配器默认严格校验 `GuitarPro.exe` 和注入 DLL 的 SHA-256，只接受已验证的 8.1.2.37 配对。安全边界、依赖准备和数据目录见 [docs/GUITAR_PRO_DATASET.md](docs/GUITAR_PRO_DATASET.md)。
 
 2026-07-14 的 GP8 source-disjoint 端到端基准只找到 9 首满足“单轨、4–8 弦、GP3/4/5、从未进入训练”的曲目，共 18 份 PDF、431 个小节。域适配后两种版式均恢复 431/431 小节：`tab_only` 事件 P/R 92.949%/99.750%、节奏 exact 93.981%、弦/品 exact 91.379%、核心事件 exact 86.991%；`score_tab` 事件 P/R 95.382%/99.468%、节奏 exact 90.695%、弦/品 exact 87.111%、核心事件 exact 79.063%。最终 9 份 `tab_only` 和 9 份 `score_tab` IR 导出的 GP5 经回读分别保留 2,744/2,744 与 3,364/3,364 个核心声部事件；附加技法位分别有 140 和 744 个事件未被 TuxGuitar GP5 回读完整保留，已单独报告而不计入视觉核心指标。这些是独立曲目结果，不等于“所有 Guitar Pro 排版都已解决”；尤其纯五线谱、复杂结构和若干连接型技法仍在范围外。
+
+## 2026-07-15：Guitar Pro 8 矢量结构与配对验收
+
+官方 GP8 矢量 PDF 现在优先使用字符边界框恢复 TAB 攻击和弦/品，并读取速度、连音组文字及横梁绘图路径；栅格图片仍走检测器/CNN。源 GP 语义与官方 PDF 坐标对齐构成训练真值，不需要读取闭源 Guitar Pro 的内部 IR。
+
+独立九曲 `score_tab` 难例（431 小节）当前事件 P/R 99.781%/99.750%、核心事件 exact 90.658%、节奏 exact 97.618%、弦/品事件 exact 92.759%。在与 TuxGuitar 完全相同的三首配对曲上，GP8 核心/节奏/弦品分别为 97.741%/97.992%/99.582%，TuxGuitar 为 98.495%/98.913%/99.415%；三个核心指标差距均不超过 1 个百分点。九曲绝对难例仍未达到最终 98% 目标，不能解释为“所有 Guitar Pro PDF 已解决”。
+
+指定 `finaltest/test.gp5` 回归达到 34/34 小节、278/278 事件、节奏 100%、核心事件 98.201%；仍缺 5 个未打印延音音符。最新官方 GP8 回渲染产物在 `lab/20260715_gp8_target_round22/`。
 
 ## 模型和本次指标
 

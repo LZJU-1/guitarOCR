@@ -27,9 +27,23 @@ from guitarocr.pipeline.fret_token_classifier import (
 from guitarocr.pipeline.measure_rhythm_constraints import (
     apply_plausible_rhythm_corrections,
     audit_score_ir,
+    fill_single_event_vector_measures,
+    prune_empty_ir_events,
+    prune_nearby_gp8_duplicate_score_events,
+    prune_unpitched_gp8_note_events,
     refine_time_signatures_from_rhythm,
 )
 from guitarocr.pipeline.pdf_page_renderer import MODEL_RENDER_DPI, render_pdf_pages
+from guitarocr.pipeline.pdf_vector_tab import (
+    apply_pdf_vector_beam_rhythm,
+    apply_pdf_vector_tab_glyphs,
+    apply_pdf_vector_rhythm_text,
+    apply_pdf_vector_technique_text,
+    extract_pdf_tab_glyphs,
+    extract_pdf_text_spans,
+    extract_pdf_vector_beams,
+    extract_pdf_vector_tempo,
+)
 from guitarocr.pipeline.score_tab_fingering import (
     build_score_ir, correct_multidigit_fret_outliers, detect_tab_fingering,
     recover_isolated_tab_events, resolve_unambiguous_ties,
@@ -268,6 +282,30 @@ def main() -> None:
             page, systems, models["tab"], models["tab_classes"], device,
             threshold=models["tab_threshold"],
         )
+        vector_tab_summary = None
+        vector_text_spans = []
+        vector_beams = []
+        if page_source["source_pdf"] is not None:
+            vector_glyphs = extract_pdf_tab_glyphs(
+                page_source["source_pdf"],
+                int(page_source["pdf_page"]),
+                page.size,
+            )
+            vector_tab_summary = apply_pdf_vector_tab_glyphs(systems, vector_glyphs)
+            vector_text_spans = extract_pdf_text_spans(
+                page_source["source_pdf"],
+                int(page_source["pdf_page"]),
+                page.size,
+            )
+            vector_beams = extract_pdf_vector_beams(
+                page_source["source_pdf"],
+                int(page_source["pdf_page"]),
+                page.size,
+            )
+            if page_index == 1:
+                vector_tempo = extract_pdf_vector_tempo(vector_text_spans, systems)
+                if vector_tempo is not None:
+                    tempo_prediction = vector_tempo
         recover_isolated_tab_events(systems)
         fret_token_summary = None
         if models["fret_token"] is not None:
@@ -285,6 +323,19 @@ def main() -> None:
             page, systems, models["rhythm"], device, crop_root,
             models["technique"], models["technique_classes"], models["technique_thresholds"],
             models["pick_stroke"], models["pick_stroke_classes"], models["pick_stroke_thresholds"],
+        )
+        vector_rhythm_summary = (
+            apply_pdf_vector_rhythm_text(systems, vector_text_spans)
+            if vector_text_spans else None
+        )
+        vector_beam_summary = apply_pdf_vector_beam_rhythm(
+            systems,
+            vector_beams,
+            bool((vector_rhythm_summary or {}).get("gp8_font_signature", False)),
+        )
+        vector_technique_summary = (
+            apply_pdf_vector_technique_text(systems, vector_text_spans)
+            if vector_text_spans else None
         )
         classify_ties(page, systems, models["tie"], device, models["tie_threshold"])
         page_ir = build_score_ir(systems, measure_number_offset=next_measure_number)
@@ -316,6 +367,10 @@ def main() -> None:
                 "systems": len(systems),
                 "measures": len(measures),
                 "events": sum(len(measure["events"]) for measure in measures),
+                "pdf_vector_tab_fusion": vector_tab_summary,
+                "pdf_vector_rhythm_fusion": vector_rhythm_summary,
+                "pdf_vector_beam_fusion": vector_beam_summary,
+                "pdf_vector_technique_fusion": vector_technique_summary,
                 "fret_token_fusion": fret_token_summary,
                 "printed_time_signatures": sum(
                     measure["printed_time_signature"] is not None for measure in measures
@@ -344,17 +399,32 @@ def main() -> None:
             }
         ],
         "scope": (
-            "Ordered page-image TuxGuitar score+TAB intermediate representation. Time signatures and measure "
-            "numbers are propagated across pages. Exact beat positions, ties, tuning, tempo and ambiguous "
-            "multi-voice note assignment remain unresolved."
+            "Ordered score+TAB intermediate representation. Vector PDFs use positioned text glyphs for exact "
+            "printed string/fret recovery; raster images fall back to the learned TAB detector and fret CNN. "
+            "Time signatures and measure numbers are propagated across pages. Exact beat positions, tuning "
+            "and ambiguous multi-voice note assignment remain unresolved."
         ),
     }
     time_signature_refinement = refine_time_signatures_from_rhythm(document_ir)
+    empty_event_pruning = prune_empty_ir_events(document_ir)
     audit_score_ir(document_ir)
     rhythm_corrections = apply_plausible_rhythm_corrections(document_ir)
+    post_constraint_pruning = prune_empty_ir_events(document_ir)
+    empty_event_pruning["removed"] += post_constraint_pruning["removed"]
+    document_ir["empty_event_pruning"] = empty_event_pruning
+    single_event_fill = fill_single_event_vector_measures(document_ir)
     audit = document_ir["rhythm_audit_summary"]
     fret_corrections = correct_multidigit_fret_outliers(document_ir)
     tie_summary = resolve_unambiguous_ties(document_ir)
+    nearby_event_pruning = prune_nearby_gp8_duplicate_score_events(document_ir)
+    unpitched_event_pruning = prune_unpitched_gp8_note_events(document_ir)
+    audit_score_ir(document_ir)
+    post_tie_rhythm_corrections = apply_plausible_rhythm_corrections(document_ir)
+    post_tie_empty_pruning = prune_empty_ir_events(document_ir)
+    empty_event_pruning["removed"] += post_tie_empty_pruning["removed"]
+    document_ir["empty_event_pruning"] = empty_event_pruning
+    fill_single_event_vector_measures(document_ir)
+    audit = audit_score_ir(document_ir)
     output_path = args.output / "document_score_ir.json"
     output_path.write_text(json.dumps(document_ir, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({
@@ -366,8 +436,13 @@ def main() -> None:
         ),
         "rhythm_audit": audit,
         "rhythm_corrections": rhythm_corrections,
+        "single_event_vector_measure_fill": single_event_fill,
+        "empty_event_pruning": empty_event_pruning,
         "time_signature_refinement": time_signature_refinement,
         "ties": tie_summary,
+        "nearby_gp8_duplicate_score_event_pruning": nearby_event_pruning,
+        "unpitched_gp8_note_event_pruning": unpitched_event_pruning,
+        "post_tie_rhythm_corrections": post_tie_rhythm_corrections,
         "fret_corrections": fret_corrections,
         "tempo_prediction": tempo_prediction,
         "score_ir": str(output_path),

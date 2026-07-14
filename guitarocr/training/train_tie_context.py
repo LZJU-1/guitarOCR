@@ -60,7 +60,9 @@ class TieEventDataset(Dataset):
 
     def __getitem__(
         self, index: int
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+    ]:
         record = self.records[index]
         with Image.open(self.database / record["image"]) as opened:
             image = opened.convert("L")
@@ -77,6 +79,7 @@ class TieEventDataset(Dataset):
             torch.tensor(min(6, int(record["tied_note_count"])), dtype=torch.long),
             torch.tensor(min(6, int(record["score_note_count"])), dtype=torch.long),
             y_target,
+            torch.tensor(bool(record.get("y_supervision", True)), dtype=torch.bool),
         )
 
 
@@ -106,6 +109,7 @@ def calculate_loss(
     counts: torch.Tensor,
     note_counts: torch.Tensor,
     y_targets: torch.Tensor,
+    y_supervision: torch.Tensor,
     presence_weights: torch.Tensor,
     count_weights: torch.Tensor,
     note_count_weights: torch.Tensor,
@@ -114,9 +118,14 @@ def calculate_loss(
     presence_loss = nn.functional.cross_entropy(outputs[0], presence, weight=presence_weights)
     count_loss = nn.functional.cross_entropy(outputs[1], counts, weight=count_weights)
     note_count_loss = nn.functional.cross_entropy(outputs[2], note_counts, weight=note_count_weights)
-    y_loss = nn.functional.binary_cross_entropy_with_logits(
-        outputs[3], y_targets, pos_weight=y_positive_weights
-    )
+    if y_supervision.any():
+        y_loss = nn.functional.binary_cross_entropy_with_logits(
+            outputs[3][y_supervision],
+            y_targets[y_supervision],
+            pos_weight=y_positive_weights,
+        )
+    else:
+        y_loss = outputs[3].sum() * 0.0
     total = presence_loss + 0.45 * count_loss + 0.45 * note_count_loss + 0.65 * y_loss
     return total, {
         "presence": float(presence_loss.detach()),
@@ -191,8 +200,9 @@ def collect_predictions(model: nn.Module, loader: DataLoader, device: torch.devi
     result = {
         "probabilities": [], "presence": [], "count_predictions": [], "counts": [],
         "note_count_predictions": [], "note_counts": [], "y_logits": [], "y": [],
+        "y_supervision": [],
     }
-    for images, presence, counts, note_counts, y_targets in loader:
+    for images, presence, counts, note_counts, y_targets, y_supervision in loader:
         outputs = model(images.to(device, non_blocking=True))
         result["probabilities"].extend(outputs[0].softmax(dim=1)[:, 1].cpu().tolist())
         result["presence"].extend(presence.tolist())
@@ -202,6 +212,7 @@ def collect_predictions(model: nn.Module, loader: DataLoader, device: torch.devi
         result["note_counts"].extend(note_counts.tolist())
         result["y_logits"].extend(outputs[3].cpu())
         result["y"].extend(y_targets.tolist())
+        result["y_supervision"].extend(y_supervision.tolist())
     return result
 
 
@@ -224,7 +235,10 @@ def full_metrics(predictions: dict, threshold: float) -> dict:
     )
     y_true = y_predicted = y_matched = 0
     positive_event_exact = 0
+    supervised_positive_count = 0
     for index in range(len(predictions["presence"])):
+        if not predictions["y_supervision"][index]:
+            continue
         truth_bins = [bin_index for bin_index, value in enumerate(predictions["y"][index]) if value > 0.5]
         if predictions["probabilities"][index] < threshold:
             decoded: list[int] = []
@@ -236,6 +250,7 @@ def full_metrics(predictions: dict, threshold: float) -> dict:
         y_predicted += len(decoded)
         y_matched += matched
         if predictions["presence"][index]:
+            supervised_positive_count += 1
             positive_event_exact += int(
                 predictions["probabilities"][index] >= threshold
                 and predictions["count_predictions"][index] == predictions["counts"][index]
@@ -260,8 +275,10 @@ def full_metrics(predictions: dict, threshold: float) -> dict:
             "tolerance_bins": 1,
             "bin_pixels": INPUT_HEIGHT / Y_BINS,
         },
-        "positive_event_count_and_y_exact": positive_event_exact / max(1, len(positive_indices)),
+        "positive_event_count_and_y_exact": positive_event_exact / max(1, supervised_positive_count),
         "positive_event_count_and_y_exact_count": positive_event_exact,
+        "positive_event_count_and_y_support": supervised_positive_count,
+        "target_y_event_support": sum(bool(value) for value in predictions["y_supervision"]),
     }
 
 
@@ -278,7 +295,7 @@ def main() -> None:
     parser.add_argument(
         "--task-root",
         default="tie_events",
-        choices=("tie_events", "tab_tie_events"),
+        choices=("tie_events", "tab_tie_events", "gp8_tie_events"),
         help="Train score-staff or pure-TAB tie context.",
     )
     args = parser.parse_args()
@@ -315,10 +332,17 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TieContextCNN().to(device)
-    rhythm_task_root = "rhythm_events" if args.task_root == "tie_events" else "tab_rhythm_events"
+    rhythm_task_root = {
+        "tie_events": "rhythm_events",
+        "tab_tie_events": "tab_rhythm_events",
+        "gp8_tie_events": "gp8_score_rhythm_events",
+    }[args.task_root]
     rhythm_checkpoint = database / rhythm_task_root / "models" / "rhythm_context_cnn.pt"
     load_pretrained_rhythm(model, rhythm_checkpoint, device)
-    checkpoint_name = "tie_context_cnn.pt" if args.task_root == "tie_events" else "tab_tie_context_cnn.pt"
+    checkpoint_name = (
+        "tab_tie_context_cnn.pt"
+        if args.task_root == "tab_tie_events" else "tie_context_cnn.pt"
+    )
     previous_tie_checkpoint = database / args.task_root / "models" / checkpoint_name
     initialization = str(rhythm_checkpoint)
     fine_tune_checkpoint = args.init_checkpoint or previous_tie_checkpoint
@@ -338,10 +362,14 @@ def main() -> None:
     count_weights = class_weights(count_values, len(COUNT_CLASSES)).to(device)
     note_count_weights = class_weights(note_count_values, len(COUNT_CLASSES)).to(device)
     bin_counts = np.zeros(Y_BINS, dtype=np.int64)
+    y_supervised_train = 0
     for record in train_dataset.records:
+        if not bool(record.get("y_supervision", True)):
+            continue
+        y_supervised_train += 1
         bin_counts[record["tied_y_bins"]] += 1
     y_positive_weights = torch.tensor(
-        [min(20.0, math.sqrt((len(train_dataset) - count) / max(1, count))) for count in bin_counts],
+        [min(20.0, math.sqrt((y_supervised_train - count) / max(1, count))) for count in bin_counts],
         dtype=torch.float32,
         device=device,
     )
@@ -371,16 +399,17 @@ def main() -> None:
         running_loss = 0.0
         seen = 0
         components = Counter()
-        for images, presence, counts, note_counts, y_targets in train_loader:
+        for images, presence, counts, note_counts, y_targets, y_supervision in train_loader:
             images = images.to(device, non_blocking=True)
             presence = presence.to(device, non_blocking=True)
             counts = counts.to(device, non_blocking=True)
             note_counts = note_counts.to(device, non_blocking=True)
             y_targets = y_targets.to(device, non_blocking=True)
+            y_supervision = y_supervision.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=use_amp):
                 loss, loss_parts = calculate_loss(
-                    model(images), presence, counts, note_counts, y_targets,
+                    model(images), presence, counts, note_counts, y_targets, y_supervision,
                     presence_weights, count_weights, note_count_weights, y_positive_weights,
                 )
             scaler.scale(loss).backward()

@@ -11,6 +11,11 @@ import subprocess
 import sys
 
 from guitarocr.data.musescore_layout import LAYOUTS, convert_mscx_layout
+from guitarocr.guitarpro_runtime import (
+    export_gp_with_guitarpro,
+    prepare_gp5_display_mode,
+    require_guitarpro_datagen_runtime,
+)
 from guitarocr.paths import DATABASE_ROOT, PROJECT_ROOT
 
 
@@ -149,6 +154,50 @@ def render_musescore(
     run([str(executable), "-o", str(output), str(converted)])
 
 
+def render_guitarpro(
+    source: Path,
+    work_root: Path,
+    output: Path,
+    layout: str,
+    overwrite: bool,
+) -> None:
+    if output.is_file() and output.stat().st_size and not overwrite:
+        return
+    runtime = require_guitarpro_datagen_runtime()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    work_root.mkdir(parents=True, exist_ok=True)
+    display_mode = {
+        "tab_only": "tab",
+        "score_only": "notation",
+        "score_tab": "both",
+    }[layout]
+    normalized = work_root / f"{source.stem}_{layout}.gp5"
+    prepared = prepare_gp5_display_mode(
+        source,
+        normalized,
+        display_mode,
+        root=runtime.root,
+        python=runtime.python,
+        verify_hashes=False,
+    )
+    if prepared.returncode:
+        raise RuntimeError(
+            f"Guitar Pro GP5 layout preparation failed ({prepared.returncode}): "
+            f"{prepared.stdout}{prepared.stderr}"
+        )
+    exported = export_gp_with_guitarpro(
+        normalized,
+        output,
+        layout_json=work_root / f"{source.stem}_{layout}.layout.json",
+        ready_timeout=120,
+        root=runtime.root,
+        python=runtime.python,
+        verify_hashes=False,
+    )
+    if exported.returncode:
+        raise RuntimeError(f"Guitar Pro PDF export failed with exit code {exported.returncode}")
+
+
 def pdf_record(
     *,
     source: dict,
@@ -221,6 +270,15 @@ def main() -> None:
                             muse,
                             source["_source"],
                             output / "work" / "musescore" / source["id"],
+                            pdf,
+                            layout,
+                            args.overwrite,
+                        )
+                    elif renderer == "guitarpro":
+                        generation = "automatic_guitarpro_8_1_2_37"
+                        render_guitarpro(
+                            source["_source"],
+                            output / "work" / "guitarpro" / source["id"],
                             pdf,
                             layout,
                             args.overwrite,

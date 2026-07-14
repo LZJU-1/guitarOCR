@@ -20,6 +20,7 @@ dependencies = [
 guitarocr = "guitarocr.cli.pdf_to_gp:main"
 guitarocr-check = "guitarocr.cli.check_install:main"
 guitarocr-layout = "guitarocr.cli.classify_layout:main"
+guitarocr-render-gp8 = "guitarocr.export.render_gp_to_guitarpro_pdf:main"
 
 [tool.setuptools.packages.find]
 include = ["guitarocr*"]

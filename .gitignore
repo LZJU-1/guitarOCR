@@ -12,6 +12,7 @@ dist/
 tuxguitar/
 tools/
 Guitar Pro 8/
+guitar-hero-main/
 
 # Original corpora and local acceptance-test material
 music-scores-collection/

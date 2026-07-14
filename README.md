@@ -128,9 +128,20 @@ guitarocr-layout D:\pages\page_001.png
   -Renderers tuxguitar,musescore,guitarpro
 ```
 
-TuxGuitar 与 MuseScore 4 可自动生成 PDF。Guitar Pro 8 需要先由用户完成安装和试用/许可证激活；当前脚本会把待导出的源 GP、版式和目标 PDF 路径写入 `database/cross_renderer_benchmark/manual_export_queue.jsonl`。把 Guitar Pro PDF 放到队列指定位置后重新运行命令，即会自动纳入同一套像素 OCR 评估。基准只从 source-disjoint `test` 划分选曲，每条记录均为 `training_eligible=false`，不能反向加入训练集。
+TuxGuitar、MuseScore 4 与 Guitar Pro 8 现在都能自动生成基准 PDF。Guitar Pro 分支使用本地 `guitar-hero-main` 的固定 8.1.2.37 worker，先把曲目改写为目标显示模式，再后台导出 PDF 和 native layout JSON。它只用于 Windows，会在启动前结束现有 `GuitarPro.exe` 进程；运行时与注入 DLL 不进入本仓库。基准只从 source-disjoint `test` 划分选曲，每条记录均为 `training_eligible=false`，不能反向加入训练集。
 
-2026-07-14 的首个 3 首曲目、零微调基线表明域差异很大：TuxGuitar 两种版式均恢复 122/122 小节，事件召回 100%，核心事件 exact 约 91.9%–92.0%（主要缺口为双声部同横坐标的音符归属）；MuseScore `tab_only` 的核心事件 exact 只有 0.169%，`score_tab` 3/3 均未通过谱表配对。该结果用于确定适配优先级，不代表训练后的目标性能。
+```powershell
+$env:GUITAROCR_GP8_DATAGEN_ROOT = 'D:\guitarOCR\guitar-hero-main'
+$env:GUITAROCR_GP8_PYTHON = 'D:\guitarOCR\guitar-hero-main\.venv\Scripts\python.exe'
+
+# 单文件：同时输出官方 GP8 PDF 与 native layout JSON
+python -m guitarocr.export.render_gp_to_guitarpro_pdf `
+  D:\scores\song.gp5 D:\scores\song_gp8.pdf
+```
+
+适配器默认严格校验 `GuitarPro.exe` 和注入 DLL 的 SHA-256，只接受已验证的 8.1.2.37 配对。安全边界、依赖准备和数据目录见 [docs/GUITAR_PRO_DATASET.md](docs/GUITAR_PRO_DATASET.md)。
+
+2026-07-14 的首个 3 首曲目、零微调基线表明域差异很大：TuxGuitar 两种版式均恢复 122/122 小节，事件召回 100%，核心事件 exact 约 91.9%–92.0%（主要缺口为双声部同横坐标的音符归属）；MuseScore `tab_only` 的核心事件 exact 只有 0.169%，`score_tab` 3/3 均未通过谱表配对。自动 GP8 8.1.2.37 基线中，`tab_only` 三首均能推理，但把 122 个小节切成 188 个，事件 P/R 为 67.306%/73.636%、核心事件 exact 4.105%；`score_tab` 仍为 3/3 谱表配对失败。该结果用于确定适配优先级，不代表训练后的目标性能。
 
 ## 模型和本次指标
 
@@ -203,7 +214,21 @@ python -m guitarocr.data.augment_gpif_technique_labels <source_id> `
 
 数据构建器会按源曲目创建 train/validation/test，避免同一首曲子的不同页面泄漏到测试集。`source_id` 可在 `database/manifests/sources.jsonl` 查看。
 
-### 3. 训练与评估
+### 3. 生成 Guitar Pro 8 三版式域数据
+
+把 `guitar-hero-main` 放在仓库根目录，并为它准备仅含 `PyGuitarPro / PyMuPDF / Pillow / fonttools` 的 `.venv` 后运行：
+
+```powershell
+.\scripts\build_guitarpro_multimode_dataset.ps1 `
+  -RealDatasetDir D:\guitarocr_database\v2\source\gp `
+  -WorkDir D:\guitarocr_database\guitarpro8_multimode_v1
+```
+
+默认配置为 50 首技法覆盖合成曲和最多 80 首真实 GP5，分别生成 `tab / notation / both`，并输出 PDF、PNG、native layout、小节 TNL crop 标签及版面 COCO。训练必须使用 `layout_coco_source_disjoint`；它按曲目把三种版式和全部页面绑定到同一划分，不能使用外部工具原始的 `layout_coco` 随机划分。
+
+这里的自动真值是页面区域和小节语义，不是逐数字/逐音符像素框。因此它已能训练 Guitar Pro 版面检测或小节序列 OCR，但尚不能直接替代现有 TuxGuitar CNN 的细粒度标签；当前发布权重也仍不宣称支持 Guitar Pro 端到端恢复。
+
+### 4. 训练与评估
 
 ```powershell
 .\scripts\run_symbol_cnn.ps1

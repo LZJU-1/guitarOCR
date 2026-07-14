@@ -668,7 +668,13 @@ def compile_writer(root: Path) -> tuple[Path, str]:
     return classes, classpath
 
 
-def run_writer(root: Path, plan: Path, output: Path, preview: Path | None) -> dict:
+def run_writer(
+    root: Path,
+    plan: Path,
+    output: Path,
+    preview: Path | None,
+    preview_layout: str = "score_tab",
+) -> dict:
     _, classpath = compile_writer(root)
     java = java_executable()
     tuxguitar_root = require_tuxguitar_root()
@@ -688,6 +694,7 @@ def run_writer(root: Path, plan: Path, output: Path, preview: Path | None) -> di
     ]
     if preview is not None:
         command.append(str(preview))
+        command.append(preview_layout)
     completed = subprocess.run(
         command,
         cwd=root,
@@ -718,6 +725,7 @@ def export_ir(
     tempo: int | None,
     tuning: list[int] | None,
     title: str | None,
+    preview_layout: str = "score_tab",
 ) -> dict:
     root = PROJECT_ROOT
     ir_path = ir_path.resolve()
@@ -743,11 +751,18 @@ def export_ir(
             tuning=tuning,
             title=title,
         )
-    java_result = run_writer(root, plan, output, preview.resolve() if preview else None)
+    java_result = run_writer(
+        root,
+        plan,
+        output,
+        preview.resolve() if preview else None,
+        preview_layout,
+    )
     report.update(
         {
             "output_gp5": str(output),
             "preview_pdf": str(preview.resolve()) if preview else None,
+            "preview_layout": preview_layout if preview else None,
             "plan_file": str(plan),
             "tuxguitar": java_result,
         }
@@ -792,6 +807,12 @@ def main() -> None:
     parser.add_argument("--tempo", type=int)
     parser.add_argument("--tuning", type=parse_tuning_arg)
     parser.add_argument("--title")
+    parser.add_argument(
+        "--preview-layout",
+        choices=("score_tab", "tab_only", "score_only"),
+        default="score_tab",
+        help="notation layout for the optional preview PDF (default: score_tab)",
+    )
     args = parser.parse_args()
     output = args.output or root / "output" / "gp" / f"{args.score_ir.parent.name}_ocr.gp5"
     if output.suffix.lower() != ".gp5":
@@ -808,6 +829,7 @@ def main() -> None:
             tempo=args.tempo,
             tuning=args.tuning,
             title=args.title,
+            preview_layout=args.preview_layout,
         )
     except Exception as error:
         print(f"ERROR: {error}", file=sys.stderr)

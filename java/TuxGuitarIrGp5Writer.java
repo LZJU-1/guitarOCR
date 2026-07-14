@@ -97,12 +97,15 @@ public final class TuxGuitarIrGp5Writer {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length < 2 || args.length > 3) {
-            throw new IllegalArgumentException("Usage: TuxGuitarIrGp5Writer PLAN.tsv OUTPUT.gp5 [PREVIEW.pdf]");
+        if (args.length < 2 || args.length > 4) {
+            throw new IllegalArgumentException(
+                    "Usage: TuxGuitarIrGp5Writer PLAN.tsv OUTPUT.gp5 "
+                    + "[PREVIEW.pdf] [score_tab|tab_only|score_only]");
         }
         Path planPath = Path.of(args[0]).toAbsolutePath();
         Path gp5Path = Path.of(args[1]).toAbsolutePath();
-        Path previewPath = args.length == 3 ? Path.of(args[2]).toAbsolutePath() : null;
+        Path previewPath = args.length >= 3 ? Path.of(args[2]).toAbsolutePath() : null;
+        String previewLayout = args.length == 4 ? args[3] : "score_tab";
         Plan plan = readPlan(planPath);
         TGSongManager manager = new TGSongManager();
         TGSong song = buildSong(plan, manager);
@@ -115,7 +118,7 @@ public final class TuxGuitarIrGp5Writer {
             int matched = countMatchedEvents(plan, readback);
             if (previewPath != null) {
                 Files.createDirectories(previewPath.getParent());
-                writePreviewPdf(plugins.context(), readback, manager, previewPath);
+                writePreviewPdf(plugins.context(), readback, manager, previewPath, previewLayout);
             }
             TGTrack readTrack = readback.getTrack(0);
             System.out.println("OUTPUT_GP5=" + gp5Path);
@@ -129,6 +132,7 @@ public final class TuxGuitarIrGp5Writer {
             System.out.println("READBACK_MATCHED_EVENTS=" + matched + "/" + plan.events().size());
             if (previewPath != null) {
                 System.out.println("PREVIEW_PDF=" + previewPath);
+                System.out.println("PREVIEW_LAYOUT=" + previewLayout);
             }
             if (readback.countMeasureHeaders() != plan.measures().size() || matched != plan.events().size()) {
                 throw new IllegalStateException("GP5 readback did not preserve every planned measure/event");
@@ -361,10 +365,23 @@ public final class TuxGuitarIrGp5Writer {
     }
 
     private static void writePreviewPdf(
-            TGContext context, TGSong song, TGSongManager manager, Path path) throws Exception {
+            TGContext context,
+            TGSong song,
+            TGSongManager manager,
+            Path path,
+            String layout) throws Exception {
         TGPrintSettings settings = new TGPrintSettings();
-        settings.setStyle(TGLayout.DISPLAY_COMPACT | TGLayout.DISPLAY_MODE_BLACK_WHITE
-                | TGLayout.DISPLAY_SCORE | TGLayout.DISPLAY_TABLATURE);
+        int style = TGLayout.DISPLAY_COMPACT | TGLayout.DISPLAY_MODE_BLACK_WHITE;
+        if ("tab_only".equals(layout)) {
+            style |= TGLayout.DISPLAY_TABLATURE;
+        } else if ("score_only".equals(layout)) {
+            style |= TGLayout.DISPLAY_SCORE;
+        } else if ("score_tab".equals(layout)) {
+            style |= TGLayout.DISPLAY_SCORE | TGLayout.DISPLAY_TABLATURE;
+        } else {
+            throw new IllegalArgumentException("Unsupported preview layout: " + layout);
+        }
+        settings.setStyle(style);
         settings.setFromMeasure(1);
         settings.setToMeasure(song.countMeasureHeaders());
         settings.setTrackNumber(1);

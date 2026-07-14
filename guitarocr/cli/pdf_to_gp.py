@@ -112,6 +112,10 @@ def main() -> None:
     if not score_ir.is_file():
         raise FileNotFoundError(f"Inference did not produce {score_ir}")
 
+    if selected_layout == "auto":
+        reused_document = json.loads(score_ir.read_text(encoding="utf-8"))
+        selected_layout = reused_document.get("document", {}).get("layout", "score_tab")
+
     preview = None
     if not args.no_preview:
         preview = args.preview_pdf or root / "output" / "pdf" / f"{output.stem}_preview.pdf"
@@ -123,6 +127,7 @@ def main() -> None:
         tempo=args.tempo,
         tuning=args.tuning,
         title=args.title or input_pdf.stem,
+        preview_layout=selected_layout,
     )
     report["source_pdf"] = str(input_pdf)
     report["layout"] = selected_layout

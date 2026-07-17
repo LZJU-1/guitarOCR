@@ -27,10 +27,108 @@ def group_runs(values: np.ndarray, maximum_gap: int = 1) -> list[list[int]]:
     return groups
 
 
+def detect_tab_boundaries_for_lines(
+    image: Image.Image,
+    string_y: list[float],
+    *,
+    preserve_cross_staff_barlines: bool = False,
+    minimum_horizontal_density: float = 0.62,
+) -> list[float]:
+    """Detect bar boundaries when the TAB string rows are already known.
+
+    This is used by the GP8 PDF hybrid geometry path.  The PDF vector layer
+    reliably supplies string y positions even when dense digits make the
+    raster page-level chain detector discard the entire system.  Boundaries
+    still come from raster vertical strokes because fret glyphs split the
+    vector string rules into misleading endpoints.
+    """
+
+    gray = np.asarray(image.convert("L"), dtype=np.uint8)
+    black = gray < 160
+    height, width = black.shape
+    if len(string_y) < 4:
+        return []
+    rows = [int(round(value)) for value in string_y]
+    if rows[0] < 0 or rows[-1] >= height:
+        return []
+    spacing = float(np.median(np.diff(rows)))
+    top_y, bottom_y = rows[0], rows[-1]
+    vertical_counts = black[top_y : bottom_y + 1].sum(axis=0)
+    bar_groups = group_runs(
+        np.where(vertical_counts > (bottom_y - top_y + 1) * 0.90)[0]
+    )
+    if len(bar_groups) < 2:
+        return []
+
+    maximum_tail = max(2, round(spacing * 0.19))
+
+    def continuous_tail(column: int) -> int:
+        above = 0
+        for y in range(top_y - 1, max(-1, round(top_y - 4 * spacing)), -1):
+            if not black[y, column]:
+                break
+            above += 1
+        below = 0
+        for y in range(bottom_y + 1, min(height, round(bottom_y + 4 * spacing))):
+            if not black[y, column]:
+                break
+            below += 1
+        return max(above, below)
+
+    filtered_groups = [bar_groups[0]]
+    for group in bar_groups[1:-1]:
+        shortest_tail = min(continuous_tail(column) for column in group)
+        cross_staff_tail = (
+            preserve_cross_staff_barlines
+            and shortest_tail >= round(spacing * 3.5)
+        )
+        if shortest_tail <= maximum_tail or cross_staff_tail:
+            filtered_groups.append(group)
+    filtered_groups.append(bar_groups[-1])
+
+    merged: list[list[int]] = []
+    for group in filtered_groups:
+        if merged and group[0] - merged[-1][-1] <= max(3.0, spacing * 0.75):
+            merged[-1].extend(group)
+        else:
+            merged.append(group)
+    if len(merged) < 2:
+        return []
+
+    raw_boundaries = [
+        merged[0][0],
+        *(group[0] for group in merged[1:-1]),
+        merged[-1][-1],
+    ]
+    minimum_measure_width = max(80.0, spacing * 5.0)
+    minimum_initial_width = max(minimum_measure_width, spacing * 7.0)
+    boundaries = [raw_boundaries[0]]
+    for raw_index, boundary in enumerate(raw_boundaries[1:-1], start=1):
+        required_width = (
+            minimum_initial_width if raw_index == 1 else minimum_measure_width
+        )
+        if boundary - boundaries[-1] >= required_width:
+            boundaries.append(boundary)
+    final_boundary = raw_boundaries[-1]
+    if final_boundary - boundaries[-1] < minimum_measure_width and len(boundaries) > 1:
+        boundaries.pop()
+    boundaries.append(final_boundary)
+
+    system_left = max(0, int(raw_boundaries[0]))
+    system_right = min(width, int(final_boundary) + 1)
+    horizontal_density = float(
+        np.median(black[np.asarray(rows), system_left:system_right].mean(axis=1))
+    )
+    if horizontal_density < minimum_horizontal_density:
+        return []
+    return [float(value) for value in boundaries]
+
+
 def detect_tab_geometry(
     image: Image.Image,
     *,
     preserve_cross_staff_barlines: bool = False,
+    minimum_string_spacing: float | None = None,
 ) -> list[dict]:
     gray = np.asarray(image.convert("L"), dtype=np.uint8)
     black = gray < 160
@@ -53,7 +151,11 @@ def detect_tab_geometry(
     )
     candidate_rows = [max(group, key=lambda y: int(longest_runs[y])) for group in row_groups]
     chains: list[list[int]] = []
-    minimum_string_spacing = max(8.0, height * 0.006)
+    minimum_string_spacing = (
+        float(minimum_string_spacing)
+        if minimum_string_spacing is not None
+        else max(8.0, height * 0.006)
+    )
     for row_index, first_y in enumerate(candidate_rows):
         for second_y in candidate_rows[row_index + 1 :]:
             spacing = second_y - first_y

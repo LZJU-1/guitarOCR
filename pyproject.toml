@@ -12,15 +12,26 @@ dependencies = [
   "numpy>=1.26,<3",
   "opencv-python>=4.8,<5",
   "Pillow>=10,<12",
+  "PyGuitarPro>=0.7,<1",
   "PyMuPDF>=1.24,<2",
   "torch>=2.2,<3",
   "torchvision>=0.17,<1",
+]
+
+[project.optional-dependencies]
+glm-ocr = [
+  "accelerate>=1.11,<2",
+  "huggingface-hub>=1.23,<2",
+  "peft==0.18.1",
+  "safetensors>=0.8,<1",
+  "transformers==5.8.0",
 ]
 
 [project.scripts]
 guitarocr = "guitarocr.cli.pdf_to_gp:main"
 guitarocr-check = "guitarocr.cli.check_install:main"
 guitarocr-layout = "guitarocr.cli.classify_layout:main"
+guitarocr-gp = "guitarocr.pipeline.infer_glm_ocr_document:main"
 guitarocr-render-gp8 = "guitarocr.export.render_gp_to_guitarpro_pdf:main"
 
 [tool.setuptools.packages.find]

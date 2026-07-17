@@ -17,6 +17,7 @@ guitar-hero-main/
 # Original corpora and local acceptance-test material
 music-scores-collection/
 finaltest/
+guitarpro_test/
 
 # Generated datasets, annotations, logs, checkpoints and inference artifacts
 database/*
@@ -25,6 +26,7 @@ output/*
 !output/README.md
 tmp/
 reports/
+lab/
 
 # Local editor/OS files
 .idea/

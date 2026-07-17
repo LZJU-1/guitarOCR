@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import tempfile
 
 from guitarocr.guitarpro_runtime import (
     SUPPORTED_GP8_VERSION,
     export_gp_with_guitarpro,
+    prepare_gp5_display_mode,
     require_guitarpro_datagen_runtime,
 )
 
@@ -28,6 +30,14 @@ def main() -> None:
     parser.add_argument("--python", type=Path)
     parser.add_argument("--ready-timeout", type=int, default=90)
     parser.add_argument(
+        "--display-mode",
+        choices=("tab", "notation", "both"),
+        help=(
+            "rewrite a GP3/GP4/GP5 input to the requested Guitar Pro display mode "
+            "before the official GP8 PDF export"
+        ),
+    )
+    parser.add_argument(
         "--allow-unverified-runtime",
         action="store_true",
         help="skip SHA-256 verification; unsafe for a build not matched to the injector",
@@ -46,15 +56,32 @@ def main() -> None:
         verify_hashes=not args.allow_unverified_runtime,
     )
     print(f"Using Guitar Pro {SUPPORTED_GP8_VERSION}: {runtime.executable}")
-    completed = export_gp_with_guitarpro(
-        args.input,
-        output,
-        layout_json=layout_json,
-        ready_timeout=args.ready_timeout,
-        root=runtime.root,
-        python=runtime.python,
-        verify_hashes=False,
-    )
+    with tempfile.TemporaryDirectory(prefix="guitarocr_gp8_display_") as temporary:
+        export_input = args.input
+        if args.display_mode:
+            export_input = Path(temporary) / f"prepared_{args.display_mode}.gp5"
+            prepared = prepare_gp5_display_mode(
+                args.input,
+                export_input,
+                args.display_mode,
+                root=runtime.root,
+                python=runtime.python,
+                verify_hashes=False,
+            )
+            if prepared.returncode:
+                detail = (prepared.stdout or "") + (prepared.stderr or "")
+                raise SystemExit(
+                    f"Could not prepare Guitar Pro display mode {args.display_mode!r}: {detail}"
+                )
+        completed = export_gp_with_guitarpro(
+            export_input,
+            output,
+            layout_json=layout_json,
+            ready_timeout=args.ready_timeout,
+            root=runtime.root,
+            python=runtime.python,
+            verify_hashes=False,
+        )
     if completed.returncode:
         raise SystemExit(completed.returncode)
     print(f"PDF: {output}")

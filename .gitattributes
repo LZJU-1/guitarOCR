@@ -6,3 +6,4 @@
 *.txt text eol=lf
 *.ps1 text eol=crlf
 *.pt binary
+*.safetensors filter=lfs diff=lfs merge=lfs -text

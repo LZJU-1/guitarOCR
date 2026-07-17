@@ -176,10 +176,10 @@ def prepare_gp5_display_mode(
     output.parent.mkdir(parents=True, exist_ok=True)
     program = (
         "import sys, guitarpro; "
-        "from datagen.gp5 import set_display_mode; "
-        "song=guitarpro.parse(sys.argv[1]); "
+        "from datagen.gp5 import parse_gp_song, set_display_mode; "
+        "song,encoding=parse_gp_song(sys.argv[1]); "
         "set_display_mode(song, sys.argv[3]); "
-        "guitarpro.write(song, sys.argv[2], version=(5,1,0))"
+        "guitarpro.write(song, sys.argv[2], version=(5,1,0), encoding=encoding)"
     )
     return subprocess.run(
         [str(runtime.python), "-c", program, str(source), str(output), mode],

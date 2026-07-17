@@ -25,3 +25,15 @@ After training and validating replacement models, run
 
 The twelve checkpoints total 28.81 MiB. Score+TAB and pure-TAB use separate
 event/rhythm/tie/technique models; the atomic symbol and TAB digit/X models are shared.
+
+## GLM-OCR v2 end-to-end adapter
+
+`weights/glm_ocr_measure_sequence_v2_lora/` is a separate, newer pipeline.
+Its single 30.06 MiB PEFT adapter contains both the visual-tower LoRA and the
+language-Transformer LoRA. The page/measure splitter is deterministic and has
+no checkpoint. The twelve CNN files above are not loaded by
+`guitarocr.pipeline.infer_glm_ocr_document`.
+
+The GLM-OCR base model is not stored in this repository. See
+`docs/GUITAR_PRO_END_TO_END.md` for the exact download, installation and
+PDF-to-GP5 commands.

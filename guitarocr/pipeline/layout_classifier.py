@@ -18,12 +18,19 @@ def _classify_fixed_scale(page: Image.Image) -> dict:
             "layout": "score_tab", "confidence": 0.99,
             "systems": len(paired), "method": "paired_five_and_tab_staffs",
         }
-    staffs = detect_tab_geometry(page)
+    staffs = detect_tab_geometry(page, minimum_string_spacing=6.0)
     if not staffs:
         return {"layout": "unknown", "confidence": 0.0, "systems": 0, "method": "no_staffs"}
     counts = Counter(int(staff["string_count"]) for staff in staffs)
-    score_like = sum(1 for staff in staffs if int(staff["string_count"]) == 5 and float(staff["spacing"]) < 18.75)
-    tab_like = sum(1 for staff in staffs if 4 <= int(staff["string_count"]) <= 8 and float(staff["spacing"]) >= 18.75)
+    score_like = sum(
+        1 for staff in staffs
+        if int(staff["string_count"]) == 5 and float(staff["spacing"]) < 15.0
+    )
+    tab_like = sum(
+        1 for staff in staffs
+        if 4 <= int(staff["string_count"]) <= 8
+        and (int(staff["string_count"]) != 5 or float(staff["spacing"]) >= 15.0)
+    )
     if tab_like > score_like:
         layout = "tab_only"
         support = tab_like

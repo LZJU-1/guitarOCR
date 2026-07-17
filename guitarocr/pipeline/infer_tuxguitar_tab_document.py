@@ -27,6 +27,10 @@ from guitarocr.pipeline.measure_rhythm_constraints import (
     refine_time_signatures_from_rhythm,
 )
 from guitarocr.pipeline.pdf_page_renderer import MODEL_RENDER_DPI
+from guitarocr.pipeline.pdf_vector_tab import (
+    extract_pdf_text_spans,
+    extract_pdf_vector_tempo,
+)
 from guitarocr.pipeline.score_tab_fingering import (
     build_score_ir,
     correct_multidigit_fret_outliers,
@@ -221,6 +225,15 @@ def main() -> None:
             tempo_prediction = recognize_tempo(
                 page, systems[0], models["atomic"], models["atomic_classes"], device
             )
+            if source["source_pdf"] is not None:
+                vector_text_spans = extract_pdf_text_spans(
+                    source["source_pdf"],
+                    int(source["pdf_page"]),
+                    page.size,
+                )
+                vector_tempo = extract_pdf_vector_tempo(vector_text_spans, systems)
+                if vector_tempo is not None:
+                    tempo_prediction = vector_tempo
         carried_signature = propagate_time_signatures(
             page, systems, models["atomic"], models["atomic_classes"], device,
             initial=carried_signature, threshold=args.time_signature_threshold,
